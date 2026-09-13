@@ -6,11 +6,12 @@ package io.github.proairface.kotling2p
  * names, exactly what a routing app has to speak.
  *
  * Pipeline: strip a known suffix if the word ends with one (so "-ING" isn't guessed letter
- * by letter), collapse doubled consonants (so "LETTER" isn't read as two T's), then scan the
- * remaining letters left to right against a table of common English graphemes, falling back
- * to a per-letter default. Vowel stress is assigned afterward: the first vowel in the whole
- * guess gets primary stress, every other vowel gets none — approximating CMUdict's
- * convention rather than computing it linguistically.
+ * by letter, and "-ed"/plural "-s" get context-sensitive voicing — "walked" ends in T,
+ * "called" in D, "Williams" in Z), collapse doubled consonants (so "LETTER" isn't read as
+ * two T's), then scan the remaining letters left to right against a table of common English
+ * graphemes, falling back to a per-letter default. Vowel stress is assigned afterward: the
+ * first vowel in the whole guess gets primary stress, every other vowel gets none —
+ * approximating CMUdict's convention rather than computing it linguistically.
  *
  * This is a greedy scanner, not a trained model or a full English-phonology engine. Known,
  * deliberate simplifications: soft C/G before E/I/Y is treated as a rule rather than the
@@ -27,6 +28,11 @@ object LetterToSoundRules {
     )
     private val vowelLetters = setOf('A', 'E', 'I', 'O', 'U')
     private val softCgTriggers = setOf('E', 'I', 'Y')
+    private val voicedSounds = setOf(
+        "AA", "AE", "AH", "AO", "AW", "AY", "EH", "ER", "EY", "IH", "IY", "OW", "OY", "UH", "UW",
+        "B", "D", "G", "V", "Z", "ZH", "JH", "L", "M", "N", "NG", "R", "W", "Y", "DH",
+    )
+    private val voicelessConsonants = setOf("P", "T", "K", "F", "TH", "S", "SH", "CH", "HH")
 
     // Checked only when the word actually ends with the pattern, longest first — safer than
     // treating these as ordinary mid-word graphemes, since a short one like "ER" or "ES"
@@ -46,12 +52,19 @@ object LetterToSoundRules {
         "ER" to listOf("ER"),
         "LY" to listOf("L", "IY"),
         "ES" to listOf("IH", "Z"),
-        "ED" to listOf("D"),
+        "ED" to listOf("D"), // placeholder — guessLetters() resolves this contextually instead
         "AL" to listOf("AH", "L"),
     ).sortedByDescending { it.first.length }
 
     // Tried longest-first, before falling back to single letters.
     private val multiLetterRules: List<Pair<String, List<String>>> = listOf(
+        // A small, well-known exception set for silent L: "walk"/"talk"/"chalk", "calm"/
+        // "palm", "half"/"calf" — common enough in place names to be worth hardcoding rather
+        // than leaving to the generic per-letter scan, which has no way to know L goes silent
+        // here specifically.
+        "ALK" to listOf("AO", "K"),
+        "ALM" to listOf("AA", "M"),
+        "ALF" to listOf("AE", "F"),
         "OUGH" to listOf("AH", "F"),
         "AUGH" to listOf("AA", "F"),
         "EIGH" to listOf("EY"),
@@ -111,7 +124,36 @@ object LetterToSoundRules {
         }
         val stem = if (suffix != null) letters.dropLast(suffix.first.length) else letters
         val stemPhonemes = scanGraphemes(collapseDoubledConsonants(stem))
-        return if (suffix != null) stemPhonemes + suffix.second else stemPhonemes
+        val suffixPhonemes = when (suffix?.first) {
+            null -> null
+            "ED" -> resolveEdSuffix(stemPhonemes)
+            else -> suffix.second
+        }
+        val combined = if (suffixPhonemes != null) stemPhonemes + suffixPhonemes else stemPhonemes
+        return voiceTrailingS(combined, letters)
+    }
+
+    // "-ed" isn't one sound: "wanted" needs a vowel before the D (T/D endings get their own
+    // syllable), "walked" ends in a plain T (voiceless stems devoice it), and "called" ends in
+    // D otherwise. Worth the extra branch since -ed is common on invented/foreign-origin verbs
+    // this fallback actually has to handle.
+    private fun resolveEdSuffix(stemPhonemes: List<String>): List<String> {
+        val last = stemPhonemes.lastOrNull()
+        return when {
+            last == "T" || last == "D" -> listOf("IH", "D")
+            last in voicelessConsonants -> listOf("T")
+            else -> listOf("D")
+        }
+    }
+
+    // A plain final "-s" (not "-es", which the suffix table already resolves to Z) is voiced
+    // to Z after a voiced sound — "Williams", "Jones", "Adams" — but a double "-ss" root
+    // ("pass", "moss") stays unvoiced, so this only fires for a genuinely single trailing S.
+    private fun voiceTrailingS(phones: List<String>, originalLetters: String): List<String> {
+        if (!originalLetters.endsWith("S") || originalLetters.endsWith("SS")) return phones
+        if (phones.lastOrNull() != "S") return phones
+        val previous = phones.getOrNull(phones.size - 2) ?: return phones
+        return if (previous in voicedSounds) phones.dropLast(1) + "Z" else phones
     }
 
     private fun collapseDoubledConsonants(letters: String): String {

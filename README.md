@@ -75,10 +75,14 @@ the tests show.
 
 - **Rule-based fallback accuracy, measured, not guessed.** `LetterToSoundRulesBenchmarkTest`
   runs the fallback against ~860 real CMUdict words it never gets to see the dictionary
-  answer for: **14% exact phoneme-sequence match, 32% average phoneme error rate** (edit
+  answer for: **15.6% exact phoneme-sequence match, 30.7% average phoneme error rate** (edit
   distance per phoneme — so most guesses are "close," not "letter salad," even when not
   exact). That's a straightforward grapheme scanner, not a trained model — a real accuracy
-  ceiling, not a placeholder. One genuinely counterintuitive finding from that benchmark:
+  ceiling, not a placeholder. Most of the gains so far came from patterns that matter
+  specifically for *names* rather than common vocabulary — plural/possessive "-s" voicing
+  ("Williams," "Jones" ending in Z not S), context-sensitive "-ed", silent-L in "-alk"/"-alm"
+  — since ordinary dictionary words never actually reach this fallback in real use; only
+  words CMUdict doesn't know do. One genuinely counterintuitive finding from that benchmark:
   reducing every unstressed vowel to schwa (real English's dominant pattern, and the
   "obviously correct" next fix) actually made accuracy *worse* (9% exact match) — this
   dictionary's word mix skews toward non-initial stress often enough that "guess the vowel
