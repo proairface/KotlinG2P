@@ -24,12 +24,12 @@ object Evaluation {
      * CMUdict scores near-perfectly on CMUdict words it has already seen, so measuring on
      * anything else would only measure memorization.
      */
-    fun score(model: LtsModel, entries: List<Entry>): Score {
+    fun score(model: LtsModel, entries: List<Entry>, beamWidth: Int): Score {
         var exact = 0
         var exactBase = 0
         var errorRate = 0.0
         for (entry in entries) {
-            val predicted = model.predict(entry.word).map { it.arpabet }
+            val predicted = model.predict(entry.word, beamWidth).map { it.arpabet }
             if (predicted == entry.phonemes) exact++
             val predictedBase = predicted.map(::stripStress)
             val actualBase = entry.phonemes.map(::stripStress)
@@ -41,10 +41,10 @@ object Evaluation {
     }
 
     /** Prints the words the model gets wrong, which is the only way to see *how* it is wrong. */
-    fun printMistakes(model: LtsModel, entries: List<Entry>, limit: Int) {
+    fun printMistakes(model: LtsModel, entries: List<Entry>, beamWidth: Int, limit: Int) {
         println("sample held-out mistakes:")
         entries.asSequence()
-            .map { it to model.predict(it.word).map { phoneme -> phoneme.arpabet } }
+            .map { it to model.predict(it.word, beamWidth).map { phoneme -> phoneme.arpabet } }
             .filter { (entry, predicted) ->
                 predicted.map(::stripStress) != entry.phonemes.map(::stripStress)
             }

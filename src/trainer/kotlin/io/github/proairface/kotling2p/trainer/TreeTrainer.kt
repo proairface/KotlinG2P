@@ -23,9 +23,23 @@ class TreeTrainer(
     private val valueSpace: Int,
     private val numLabels: Int,
     private val settings: Settings,
+    private val random: kotlin.random.Random,
 ) {
     /** Knobs that trade model size against accuracy. */
-    data class Settings(val minLeaf: Int, val minGain: Double, val maxDepth: Int)
+    data class Settings(
+        val minLeaf: Int,
+        val minGain: Double,
+        val maxDepth: Int,
+        /**
+         * How many features each split may choose between, drawn fresh at every node.
+         *
+         * Equal to the total feature count this is ordinary CART. Lower, it is a random forest's
+         * tree: deliberately handicapped, so that trees grown on different samples make
+         * *different* mistakes instead of all making the same one. Only worth anything when
+         * several trees vote — see the ensemble handling in `Train.kt`.
+         */
+        val featuresPerSplit: Int,
+    )
 
     sealed interface Node
     class Leaf(val label: Int) : Node
@@ -37,6 +51,7 @@ class TreeTrainer(
     private val keyGeneration = IntArray(keyCount)
     private val touchedKeys = IntArray(keyCount)
     private val nodeCounts = IntArray(numLabels)
+    private val featurePool = IntArray(numFeatures) { it }
     private var generation = 0
 
     fun train(rows: IntArray): Node = grow(rows, 0)
@@ -48,7 +63,8 @@ class TreeTrainer(
             return leafOf(present)
         }
 
-        val touched = buildHistogram(rows)
+        val candidates = selectFeatures()
+        val touched = buildHistogram(rows, candidates)
         var bestKey = -1
         var bestScore = negativeEntropy(present, rows.size)
 
@@ -89,19 +105,39 @@ class TreeTrainer(
     /**
      * Turns the node's label counts into a leaf holding the most frequent one, and resets them.
      *
-     * Only the winner is kept. An earlier version stored the runners-up so the decoder could beam
-     * search over whole words, which sounds like it should help a model that conditions on its own
-     * output — but measurement said otherwise, and the reason is worth recording. With
-     * `minLeaf = 1` the trees grow until every leaf is pure, so there are no runners-up to search
-     * over; stopping earlier to create some cost more accuracy than the search recovered, at every
-     * stopping point tried (61.7% to 62.0% at `minLeaf = 2`, against 64.2% for growing out and
-     * taking each letter's answer as it comes).
+     * A leaf keeps only its winner, and needs to: grown to `minLeaf = 1` the tree is pure at every
+     * leaf, so there are no runners-up to keep. An earlier version stored them anyway, to let the
+     * decoder search over whole words, and it bought nothing for exactly that reason — the
+     * distribution was always one-hot. Stopping the trees earlier to manufacture uncertainty cost
+     * more accuracy than the search won back (62.0% at `minLeaf = 2`, against 64.2% for growing
+     * out and taking each letter's answer as it comes).
+     *
+     * The uncertainty a search needs comes from the ensemble instead, where several differently
+     * grown trees vote and their disagreement is the confidence estimate — which is also what
+     * finally made the search worth having (66.8% to 67.7% at nine trees).
      */
     private fun leafOf(present: IntArray): Leaf {
         var majority = present[0]
         for (label in present) if (nodeCounts[label] > nodeCounts[majority]) majority = label
         clearNodeCounts(present)
         return Leaf(majority)
+    }
+
+    /**
+     * Shuffles [settings.featuresPerSplit] features to the front of [featurePool] and returns how
+     * many. A partial Fisher-Yates, so the pool stays a permutation of every feature and no node
+     * is ever permanently denied one.
+     */
+    private fun selectFeatures(): Int {
+        val count = minOf(settings.featuresPerSplit, numFeatures)
+        if (count == numFeatures) return count
+        for (i in 0 until count) {
+            val j = i + random.nextInt(numFeatures - i)
+            val swap = featurePool[i]
+            featurePool[i] = featurePool[j]
+            featurePool[j] = swap
+        }
+        return count
     }
 
     private fun featureAt(row: Int, feature: Int): Int =
@@ -128,12 +164,13 @@ class TreeTrainer(
      * A generation stamp retires the previous node's counts in O(1) rather than clearing an
      * array that is mostly untouched at depth.
      */
-    private fun buildHistogram(rows: IntArray): Int {
+    private fun buildHistogram(rows: IntArray, candidates: Int): Int {
         generation++
         var touched = 0
         for (row in rows) {
             val label = labels[row]
-            for (feature in 0 until numFeatures) {
+            for (index in 0 until candidates) {
+                val feature = featurePool[index]
                 val key = feature * valueSpace + featureAt(row, feature)
                 if (keyGeneration[key] != generation) {
                     keyGeneration[key] = generation

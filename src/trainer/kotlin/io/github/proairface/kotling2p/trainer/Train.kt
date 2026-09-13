@@ -8,19 +8,16 @@ import java.io.File
  * Trains the letter-to-sound model and writes it to the path given as the first argument, then
  * scores it on the held-out split.
  *
- * Run via `./gradlew :trainer:trainLts`. The resulting file is committed, so this is not part of
+ * Run via `./gradlew trainLts`. The resulting file is committed, so this is not part of
  * a normal build — it exists so the shipped model can be reproduced and audited rather than taken
  * on faith. Hyperparameters can be swept without editing code:
- * `./gradlew :trainer:trainLts -Dlts.context=5 -Dlts.history=3`.
+ * `./gradlew trainLts -Dlts.trees=15 -Dlts.context=5`.
  */
 fun main(arguments: Array<String>) {
     val output = File(arguments.firstOrNull() ?: error("usage: train <output-file>"))
     val emIterations = intProperty("lts.emIterations", 12)
-    val settings = TreeTrainer.Settings(
-        minLeaf = intProperty("lts.minLeaf", 1),
-        minGain = 1e-6,
-        maxDepth = intProperty("lts.maxDepth", 64),
-    )
+    val ensembleSize = intProperty("lts.trees", 9)
+    val seed = intProperty("lts.seed", 20260913).toLong()
 
     val started = System.currentTimeMillis()
     val all = Corpus.load()
@@ -37,7 +34,7 @@ fun main(arguments: Array<String>) {
     )
     println(
         "settings: contextRadius=${layout.contextRadius} phonemeHistory=${layout.phonemeHistory} " +
-            "emIterations=$emIterations $settings",
+            "emIterations=$emIterations",
     )
 
     val chunks = ChunkTable()
@@ -60,22 +57,51 @@ fun main(arguments: Array<String>) {
     println("aligned ${aligned.size} of ${training.size} training entries")
     printSampleAlignments(aligned, chunks)
 
+    // A single tree sees every feature at every split and every training row exactly once; that
+    // is plain CART, and was the whole model before the ensemble existed. Several trees only help
+    // if they disagree, so each gets its own bootstrap resample and a random subset of features
+    // per split — the two standard sources of disagreement in a random forest.
+    val settings = TreeTrainer.Settings(
+        minLeaf = intProperty("lts.minLeaf", 1),
+        minGain = 1e-6,
+        maxDepth = intProperty("lts.maxDepth", 64),
+        // Ten of twelve. Holding back two features per split is enough to make the trees
+        // disagree where the evidence is thin, which is the whole point; holding back four
+        // leaves them too weak to vote well (67.7% against 68.0% at nine trees, and a wider
+        // 68.0% against 68.9% at fifteen).
+        featuresPerSplit = intProperty(
+            "lts.featuresPerSplit",
+            if (ensembleSize == 1) layout.featureCount else layout.featureCount - 2,
+        ),
+    )
+    println("settings: ensembleSize=$ensembleSize $settings")
+
     val examples = Examples.build(aligned, alphabet, phonemes, layout, chunks)
-    val trees = HashMap<Int, TreeTrainer.Node>()
+    val forest = HashMap<Int, List<TreeTrainer.Node>>()
     for (letter in alphabet.characters.indices) {
         val letterExamples = examples.forLetter(letter) ?: continue
-        val tree = TreeTrainer(
-            features = letterExamples.features,
-            labels = letterExamples.labels,
-            numFeatures = layout.featureCount,
-            valueSpace = layout.valueSpace,
-            numLabels = letterExamples.chunkIds.size,
-            settings = settings,
-        ).train(IntArray(letterExamples.labels.size) { it })
-        trees[letter] = letterExamples.toGlobalLabels(tree)
+        val rowCount = letterExamples.labels.size
+        val random = kotlin.random.Random(seed + letter)
+        forest[letter] = List(ensembleSize) { tree ->
+            val rows = if (ensembleSize == 1) {
+                IntArray(rowCount) { it }
+            } else {
+                IntArray(rowCount) { random.nextInt(rowCount) }
+            }
+            val trained = TreeTrainer(
+                features = letterExamples.features,
+                labels = letterExamples.labels,
+                numFeatures = layout.featureCount,
+                valueSpace = layout.valueSpace,
+                numLabels = letterExamples.chunkIds.size,
+                settings = settings,
+                random = random,
+            ).train(rows)
+            letterExamples.toGlobalLabels(trained)
+        }
     }
 
-    val stats = ModelWriter.write(output, alphabet, phonemes, layout, trees, chunks)
+    val stats = ModelWriter.write(output, alphabet, phonemes, layout, forest, chunks)
     println(
         "model: ${stats.nodes} nodes (${stats.leaves} leaves), ${stats.labels} labels, " +
             "%.1f KB at $output".format(stats.bytes / 1024.0),
@@ -83,9 +109,10 @@ fun main(arguments: Array<String>) {
     println("trained in ${(System.currentTimeMillis() - started) / 1000}s")
 
     val model = output.inputStream().use { LtsModel.read(it) }
-    println("held-out score:")
-    println(Evaluation.score(model, heldOut))
-    Evaluation.printMistakes(model, heldOut, limit = 25)
+    val beamWidth = intProperty("lts.beam", LtsModel.DEFAULT_BEAM_WIDTH)
+    println("held-out score (beam width $beamWidth):")
+    println(Evaluation.score(model, heldOut, beamWidth))
+    Evaluation.printMistakes(model, heldOut, beamWidth, limit = 25)
 }
 
 /** A word whose every letter now has the phoneme chunk it is responsible for. */

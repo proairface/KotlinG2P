@@ -55,11 +55,11 @@ class LtsModelBenchmarkTest {
         println("  phoneme error rate:              %.1f%%".format(errorRate * 100))
         println("  model load time:                 ${loadMillis}ms")
 
-        // Floors, not targets: calibrated well below the measured 64.2% / 9.0% so this catches a
-        // real regression — a broken model file, a decoder that drifts out of step with the
-        // trainer — without failing on ordinary retraining noise.
-        assertTrue(ignoringStress > 0.55, "word accuracy fell to $ignoringStress")
-        assertTrue(errorRate < 0.12, "phoneme error rate rose to $errorRate")
+        // Floors, not targets: calibrated below the measured 68.0% / 7.7% so this catches a real
+        // regression — a broken model file, a decoder that drifts out of step with the trainer —
+        // without failing on ordinary retraining noise, or on a deliberately smaller ensemble.
+        assertTrue(ignoringStress > 0.62, "word accuracy fell to $ignoringStress")
+        assertTrue(errorRate < 0.09, "phoneme error rate rose to $errorRate")
     }
 
     @Test

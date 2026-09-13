@@ -20,19 +20,26 @@ object ModelWriter {
         alphabet: Alphabet,
         phonemes: PhonemeVocabulary,
         layout: FeatureLayout,
-        trees: Map<Int, TreeTrainer.Node>,
+        forest: Map<Int, List<TreeTrainer.Node>>,
         chunks: ChunkTable,
     ): Stats {
+        val ensembleSize = forest.values.firstOrNull()?.size ?: 1
         val labelIds = LinkedHashMap<Int, Int>()
         val flat = FlatNodes(labelIds)
-        val roots = IntArray(alphabet.characters.size)
-        for ((letter, tree) in trees.entries.sortedBy { it.key }) {
-            roots[letter] = flat.append(tree, layout.valueSpace) + 1
+        // Roots are laid out letter-major: all of a letter's trees together, so the decoder walks
+        // a contiguous run when it votes.
+        val roots = IntArray(alphabet.characters.size * ensembleSize)
+        for ((letter, trees) in forest.entries.sortedBy { it.key }) {
+            require(trees.size == ensembleSize) { "every letter needs the same number of trees" }
+            trees.forEachIndexed { index, tree ->
+                roots[letter * ensembleSize + index] = flat.append(tree, layout.valueSpace) + 1
+            }
         }
 
         val body = ByteArrayOutputStream()
         body.write("KG2P".toByteArray(Charsets.US_ASCII))
         body.varint(1)
+        body.varint(ensembleSize)
         body.varint(layout.contextRadius)
         body.varint(layout.phonemeHistory)
         body.varint(layout.valueSpace)

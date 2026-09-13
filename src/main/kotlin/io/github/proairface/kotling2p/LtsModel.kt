@@ -33,11 +33,17 @@ class FeatureLayout(val contextRadius: Int, val phonemeHistory: Int, val valueSp
  * is worst at. So the quality of *this* path, not the dictionary's coverage, is what a listener
  * actually notices.
  *
- * The model is one decision tree per letter, trained offline on CMUdict by the `trainer`
- * subproject (`./gradlew :trainer:trainLts`) and shipped as a compact binary resource. Each tree
- * predicts the phonemes one letter is responsible for, given the letters around it and the
- * phonemes already chosen to its left. Decoding is a pointer chase down one tree per letter — no
- * floating point, and no allocation beyond the result.
+ * The model is a small forest of decision trees per letter, trained offline on CMUdict by the
+ * `trainer` source set (`./gradlew trainLts`) and shipped as a compact binary resource.
+ * Each tree predicts the phonemes one letter is responsible for, given the letters around it and
+ * the phonemes already chosen to its left.
+ *
+ * Two things follow from that shape. Conditioning on its own output makes this a left-to-right
+ * sequence model, so taking each letter's best answer in turn is not the same as finding the best
+ * whole word — hence the beam search in [predict]. And having several trees vote turns a bare
+ * answer into a distribution over answers, which is what gives that search anything to choose
+ * between: where the evidence is thin the trees disagree, and the disagreement is the confidence
+ * estimate a single tree grown to pure leaves can never produce.
  *
  * See the trainer's `Aligner` and `TreeTrainer` for how it is built, and `LtsModelBenchmarkTest`
  * for what it scores on words it was never trained on.
@@ -49,6 +55,7 @@ class FeatureLayout(val contextRadius: Int, val phonemeHistory: Int, val valueSp
  * ```
  * magic            4 bytes, "KG2P"
  * version          varint, currently 1
+ * ensembleSize     varint, trees per letter
  * contextRadius    varint, letters of context each side
  * phonemeHistory   varint, how many already-emitted phonemes are visible
  * valueSpace       varint, the stride used to pack (feature, value) into one number
@@ -58,8 +65,8 @@ class FeatureLayout(val contextRadius: Int, val phonemeHistory: Int, val valueSp
  *                  is the id meaning "nothing emitted yet"
  * labels           varint count, then each as varint length + ASCII: space-separated ARPAbet,
  *                  empty for a silent letter
- * roots            one varint per alphabet letter: its tree's node index plus one, or 0 for a
- *                  letter with no tree
+ * roots            ensembleSize varints per alphabet letter, that letter's trees together: each
+ *                  a node index plus one, or 0 for a letter with no tree
  * nodes            varint count, then that many nodes in pre-order, each two varints:
  *                    tag 0        a leaf; the second varint is its label index
  *                    tag non-zero a branch asking whether feature (tag-1)/valueSpace currently
@@ -71,13 +78,20 @@ class FeatureLayout(val contextRadius: Int, val phonemeHistory: Int, val valueSp
  */
 class LtsModel private constructor(
     private val alphabet: String,
+    private val ensembleSize: Int,
     private val layout: FeatureLayout,
     private val labels: Array<List<Phoneme>>,
     /** Per label, the history ids of the phonemes it emits, so decoding needs no string work. */
     private val labelHistoryIds: Array<IntArray>,
     private val phonemeBoundary: Int,
     private val roots: IntArray,
-    private val nodeTag: IntArray,
+    /**
+     * Each node's question, or [LEAF]. Held as shorts rather than ints purely for memory: a tag
+     * is at most `featureCount * valueSpace`, a few hundred, and at ensemble sizes worth shipping
+     * there are over a million nodes, so the two bytes saved on each is several megabytes of
+     * phone heap.
+     */
+    private val nodeTag: ShortArray,
     private val nodePayload: IntArray,
 ) {
     /** One past the last real letter id — the value a letter feature takes outside the word. */
@@ -88,36 +102,77 @@ class LtsModel private constructor(
         alphabet.forEachIndexed { id, char -> it[char.code] = id }
     }
 
-    /** Phonemes for [word], which is expected to be a single already-normalized word. */
-    fun predict(word: String): List<Phoneme> {
+    /**
+     * Phonemes for [word], which is expected to be a single already-normalized word.
+     *
+     * Keeps [beamWidth] candidate pronunciations alive across the word rather than committing to
+     * each letter's most popular answer as it goes. Because every tree can see the phonemes
+     * chosen to its left, an early choice changes the questions later letters are asked, and the
+     * locally best first choice is regularly not part of the best whole word.
+     */
+    fun predict(word: String, beamWidth: Int = DEFAULT_BEAM_WIDTH): List<Phoneme> {
         val letters = word.lowercase()
         val ids = IntArray(letters.length) {
             val code = letters[it].code
             if (code < 128) letterIds[code] else -1
         }
-        val history = IntArray(layout.phonemeHistory) { phonemeBoundary }
-        val result = ArrayList<Phoneme>(letters.length + 2)
+
+        var beam = listOf(Hypothesis(0.0, IntArray(0), IntArray(layout.phonemeHistory) { phonemeBoundary }))
+        val votes = HashMap<Int, Int>()
         for (position in ids.indices) {
             val letter = ids[position]
             if (letter < 0) continue
-            val root = roots[letter]
-            if (root == NO_TREE) continue
-            val label = classify(root, ids, position, history)
-            result += labels[label]
-            if (history.isNotEmpty()) {
-                for (id in labelHistoryIds[label]) {
-                    for (slot in history.size - 1 downTo 1) history[slot] = history[slot - 1]
-                    history[0] = id
+            val first = letter * ensembleSize
+            if (roots[first] == NO_TREE) continue
+
+            val extended = ArrayList<Hypothesis>(beam.size * ensembleSize)
+            for (hypothesis in beam) {
+                votes.clear()
+                var cast = 0
+                for (tree in first until first + ensembleSize) {
+                    if (roots[tree] == NO_TREE) continue
+                    val label = classify(roots[tree], ids, position, hypothesis.history)
+                    votes[label] = (votes[label] ?: 0) + 1
+                    cast++
+                }
+                for ((label, count) in votes) {
+                    val cost = -Math.log(count.toDouble() / cast)
+                    extended += hypothesis.extend(label, cost, labelHistoryIds[label])
                 }
             }
+            beam = if (extended.size <= beamWidth) {
+                extended
+            } else {
+                extended.sortedBy { it.cost }.subList(0, beamWidth)
+            }
         }
+
+        val best = beam.minByOrNull { it.cost } ?: return emptyList()
+        val result = ArrayList<Phoneme>(best.labels.size + 2)
+        for (label in best.labels) result += labels[label]
         return result
+    }
+
+    /** One candidate pronunciation of the word so far. [cost] is additive; lower is better. */
+    private class Hypothesis(val cost: Double, val labels: IntArray, val history: IntArray) {
+        fun extend(label: Int, addedCost: Double, emitted: IntArray): Hypothesis {
+            val nextLabels = labels.copyOf(labels.size + 1)
+            nextLabels[labels.size] = label
+            val nextHistory = history.copyOf()
+            if (nextHistory.isNotEmpty()) {
+                for (id in emitted) {
+                    for (slot in nextHistory.size - 1 downTo 1) nextHistory[slot] = nextHistory[slot - 1]
+                    nextHistory[0] = id
+                }
+            }
+            return Hypothesis(cost + addedCost, nextLabels, nextHistory)
+        }
     }
 
     private fun classify(root: Int, ids: IntArray, position: Int, history: IntArray): Int {
         var node = root
         while (true) {
-            val tag = nodeTag[node]
+            val tag = nodeTag[node].toInt()
             if (tag == LEAF) return nodePayload[node]
             val question = tag - 1
             val feature = question / layout.valueSpace
@@ -137,6 +192,12 @@ class LtsModel private constructor(
     }
 
     companion object {
+        /**
+         * Wide enough that widening it further stopped changing the held-out score, and narrow
+         * enough that a word still decodes in microseconds.
+         */
+        const val DEFAULT_BEAM_WIDTH = 8
+
         private const val RESOURCE_PATH = "lts/model.bin"
         private const val LEAF = 0
         private const val NO_TREE = -1
@@ -157,6 +218,7 @@ class LtsModel private constructor(
             val version = cursor.varint()
             require(version == 1) { "unsupported model version $version" }
 
+            val ensembleSize = cursor.varint()
             val layout = FeatureLayout(
                 contextRadius = cursor.varint(),
                 phonemeHistory = cursor.varint(),
@@ -179,19 +241,21 @@ class LtsModel private constructor(
             }
 
             // Stored one-based so that zero can mean "this letter never occurred in training".
-            val roots = IntArray(alphabet.length) { cursor.varint() - 1 }
+            val roots = IntArray(alphabet.length * ensembleSize) { cursor.varint() - 1 }
             val nodeCount = cursor.varint()
-            val nodeTag = IntArray(nodeCount)
+            val nodeTag = ShortArray(nodeCount)
             val nodePayload = IntArray(nodeCount)
             for (node in 0 until nodeCount) {
                 val tag = cursor.varint()
-                nodeTag[node] = tag
+                require(tag <= Short.MAX_VALUE) { "tag $tag does not fit the node table" }
+                nodeTag[node] = tag.toShort()
                 // A leaf's second field is its label; a branch's is the distance to its "no"
                 // child, a delta because pre-order guarantees the child comes later.
                 nodePayload[node] = if (tag == LEAF) cursor.varint() else node + cursor.varint()
             }
             return LtsModel(
-                alphabet, layout, labels, labelHistoryIds, phonemeCount, roots, nodeTag, nodePayload,
+                alphabet, ensembleSize, layout, labels, labelHistoryIds, phonemeCount,
+                roots, nodeTag, nodePayload,
             )
         }
     }
