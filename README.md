@@ -73,10 +73,17 @@ the tests show.
 
 ## Known limitations
 
-- **Rule-based fallback accuracy is unproven at scale.** It's a straightforward grapheme
-  scanner, not a trained model — expect reasonable results on regular English spelling and
-  rough guesses on unusual names. A trained neural fallback (the same dictionary-first,
-  small-seq2seq-model-second pattern used by
+- **Rule-based fallback accuracy, measured, not guessed.** `LetterToSoundRulesBenchmarkTest`
+  runs the fallback against ~860 real CMUdict words it never gets to see the dictionary
+  answer for: **14% exact phoneme-sequence match, 32% average phoneme error rate** (edit
+  distance per phoneme — so most guesses are "close," not "letter salad," even when not
+  exact). That's a straightforward grapheme scanner, not a trained model — a real accuracy
+  ceiling, not a placeholder. One genuinely counterintuitive finding from that benchmark:
+  reducing every unstressed vowel to schwa (real English's dominant pattern, and the
+  "obviously correct" next fix) actually made accuracy *worse* (9% exact match) — this
+  dictionary's word mix skews toward non-initial stress often enough that "guess the vowel
+  letter's own sound everywhere" beat "assume the first syllable is stressed." A trained
+  neural fallback (the same dictionary-first, small-seq2seq-model-second pattern used by
   [g2pE](https://github.com/Kyubyong/g2p)) is the natural next step if this proves too rough
   in practice.
 - **No homograph disambiguation.** CMUdict lists multiple pronunciations for words like
