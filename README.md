@@ -105,6 +105,24 @@ the tests show.
 Apache-2.0 (see `LICENSE`). The bundled CMUdict data keeps its own BSD-style license from
 Carnegie Mellon University — see `src/main/resources/cmudict/LICENSE`.
 
+## Installation
+
+Available via [JitPack](https://jitpack.io/#proairface/KotlinG2P), built directly from
+GitHub tags — no extra account needed:
+
+```kotlin
+repositories {
+    maven { url = uri("https://jitpack.io") }
+}
+
+dependencies {
+    implementation("com.github.proairface:KotlinG2P:v0.1.0")
+}
+```
+
+Not yet on Maven Central — that needs a verified `io.github.proairface` namespace and a
+GPG-signed release pipeline, both of which are a real setup step rather than a code change.
+
 ## Building
 
 ```bash
