@@ -48,6 +48,37 @@ result.forEach { word ->
 Need IPA instead of ARPAbet for a particular TTS engine? `ArpabetToIpa.toIpa(phoneme)` converts
 one phoneme at a time.
 
+### Piper voice compatibility
+
+`G2P.toEspeakIpa(text)` produces a full transcription in the exact format a
+[Piper](https://github.com/rhasspy/piper)-trained voice model expects — the same phoneme
+vocabulary and stress-marker placement espeak-ng itself produces, without depending on
+espeak-ng at all:
+
+```kotlin
+G2P().toEspeakIpa("baker street") // "bˈeɪkɚ stɹˈiːt"
+```
+
+This was verified by running espeak-ng directly (`espeak-ng -v en-us --ipa`) and comparing
+its real output word-for-word — not assumed from textbook IPA. `EspeakIpaTest` checks against
+13 real samples: 12 match exactly, one ("telephone") is a documented, understood gap — see
+that test for why. The verification surfaced real, specific findings along the way:
+
+- Textbook IPA's "ɝ" for stressed ARPAbet ER **doesn't exist in Piper's phoneme vocabulary at
+  all** — real espeak-ng output uses "ɜː" instead. Feeding a Piper voice the textbook symbol
+  would silently produce an invalid, unrecognized token.
+- Stress markers (ˈ, ˌ) go immediately before the stressed vowel itself, not before the
+  syllable's onset consonants — simpler to implement than the textbook rule suggests.
+- American-English flapping (intervocalic T -> ɾ, "letter" -> "lˈɛɾɚ") is real, consistent,
+  and cheap to replicate — but doesn't extend to D the way some phonology summaries imply
+  ("murder" keeps a plain D), confirmed by testing rather than assumed by symmetry.
+- Espeak-ng distinguishes several unstressed-vowel qualities (ɐ, ə, ᵻ) that plain
+  ARPAbet/CMUdict has no equivalent for — CMUdict just has one generic reduced vowel (AH0)
+  regardless of which of these espeak-ng would actually produce. One specific, confirmed case
+  is handled (word-initial unstressed AH -> ɐ); others, like "telephone"'s ᵻ, are an accepted
+  gap this library structurally can't close without a training-time distinction ARPAbet never
+  captured.
+
 ## Design
 
 ```
