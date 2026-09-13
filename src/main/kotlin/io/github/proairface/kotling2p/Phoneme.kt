@@ -10,9 +10,17 @@ data class Phoneme(val arpabet: String) {
     override fun toString(): String = arpabet
 }
 
-/** Where a word's pronunciation came from — useful for callers that want to know when the
- * fallback rules (rather than the dictionary) had to guess. */
-enum class PronunciationSource { DICTIONARY, RULES }
+/**
+ * Where a word's pronunciation came from — useful for callers that want to know when the model
+ * (rather than the dictionary) had to guess.
+ */
+enum class PronunciationSource {
+    /** Looked up verbatim in CMUdict; correct by construction. */
+    DICTIONARY,
+
+    /** Predicted by [LtsModel] because the word is not in the dictionary. */
+    LETTER_TO_SOUND,
+}
 
 /** The phonemes produced for one input word, and which path produced them. */
 data class WordPronunciation(

@@ -1,8 +1,8 @@
 # KotlinG2P
 
-Espeak-free English grapheme-to-phoneme (G2P) library for Kotlin/JVM — CMUdict lookup plus
-letter-to-sound fallback rules for on-device TTS. No espeak-ng, no GPL, anywhere in the
-dependency tree.
+Espeak-free English grapheme-to-phoneme (G2P) library for Kotlin/JVM — CMUdict lookup plus a
+letter-to-sound model trained on that dictionary, for on-device TTS. No espeak-ng, no GPL,
+anywhere in the dependency tree, and no dependencies at all at runtime.
 
 ## Why this exists
 
@@ -17,15 +17,16 @@ pieces:
 
 - **[CMUdict](https://github.com/cmusphinx/cmudict)** (Carnegie Mellon, BSD-style license) for
   exact-match lookup of ~135,000 common English words.
-- **A clean-room, hand-written letter-to-sound ruleset** (not derived from espeak-ng or any
-  other GPL codebase) as a fallback for words the dictionary doesn't know — mostly proper
-  nouns and place names.
+- **A clean-room letter-to-sound model** (trained from scratch on that dictionary, not derived
+  from espeak-ng or any other GPL codebase) for words the dictionary doesn't know — mostly
+  proper nouns and place names. It gets **64.2% of unseen words exactly right**, at a 9.0%
+  phoneme error rate; see "Accuracy" below for how that is measured and what it replaced.
 
 This library was built as the phonemization fallback for
 [Detour](https://github.com/proairface/detour), a delivery-routing app, whose whole problem is
 having to speak arbitrary street and place names it's never seen before. That's exactly the
-input class that dictionary-only G2P engines silently fail on — see "Known limitations" below
-for the honest version of how well the fallback actually does.
+input class that dictionary-only G2P engines silently fail on — see "Accuracy" below for the
+honest version of how well the model actually does.
 
 ## Usage
 
@@ -91,36 +92,86 @@ TextNormalizer   — numbers/ordinals to words, street & directional abbreviatio
 CmuDict lookup   — exact match against the bundled dictionary (~135k words)
   │  miss
   ▼
-LetterToSoundRules — greedy longest-match grapheme scanner, always returns something
+LtsModel         — one decision tree per letter, trained on CMUdict; always returns something
   │
   ▼
 phonemes (ARPAbet, optionally converted to IPA)
 ```
 
-The dictionary path is exact and reliable. The rules path is a deliberately simple fallback —
-its job is "never leave a word unpronounceable," not "get every guess right." See
-`LetterToSoundRulesTest` for what it actually handles; there's no accuracy claim beyond what
-the tests show.
+The dictionary path is exact by construction. The model path is what this library's accuracy
+really means, since it is the one that runs on the names an app has never seen.
+
+### How the model is built
+
+The dictionary says "box" is `B AA1 K S`. It does not say that the x is the part saying `K S`,
+and every learning step needs that. So the trainer (`./gradlew :trainer:trainLts`, a separate
+non-published subproject) works in two stages:
+
+1. **Alignment.** Expectation-maximization over every way a word's letters could divide up its
+   phonemes, each letter taking zero, one or two of them. Pairings that recur across thousands
+   of words reinforce; coincidental ones starve. Twelve rounds over 118k words produces
+   alignments like `b:B o:AA1 x:K S`, `p:F h:-`, `k:- n:N i:AY1 g:- h:- t:T`,
+   `c:K u:"Y UW1" t:T e:-`. Only 25 of 118,714 entries cannot be aligned at all.
+2. **Classification.** One CART decision tree per letter, splitting on the four letters either
+   side and on the last four phonemes already emitted, grown until its leaves are pure.
+
+Both stages together take about six seconds on a laptop-class machine.
+
+The result is serialized to a 375 KB binary resource (`src/main/resources/lts/model.bin`),
+committed so a normal build never retrains, and decoded at runtime by a pointer chase down one
+tree per letter — no floating point, no allocation beyond the result, **3–11 ms to load** the
+whole model.
+
+## Accuracy
+
+`LtsModelBenchmarkTest` scores the shipped model against the 6,212 CMUdict words the trainer
+was **not allowed to see** (`TrainingSplit` holds out one word in twenty, by hashing the word
+itself, and the trainer and the benchmark call the same function so they cannot drift apart).
+Training on a dictionary and then scoring on that same dictionary would measure only memory.
+
+|                                  | hand-written rules (v0.2.0) | trained model (v0.3.0) |
+|----------------------------------|-----------------------------|------------------------|
+| word accuracy, ignoring stress   | 15.6%                       | **64.2%**              |
+| word accuracy, with stress       | —                           | **54.4%**              |
+| phoneme error rate               | 30.7%                       | **9.0%**               |
+
+Word accuracy counts a single wrong vowel as total failure, so the error rate is the better
+guide to how a word actually sounds: at 9.0%, most misses are one reduced vowel or one stress
+mark away, and the consonant skeleton — which is what carries intelligibility — is nearly
+always right. What remains wrong is dominated by genuinely under-determined proper nouns, where
+the spelling does not settle it: `acosta` as `AE1 K OW1 S T AH0` against CMUdict's
+`AH0 K AO1 S T AH0`.
+
+### Things that were tried and did not work
+
+Recorded because a negative result that isn't written down gets re-attempted:
+
+- **Wider letter context.** Five letters either side scored *worse* than four (62.9% against
+  64.2%, everything else held equal), the extra splits fragmenting the training data rather than
+  informing it. Six was worse again.
+- **Position-in-word features.** Telling each tree how far its letter sits from the start and
+  end of the word looked like the missing signal for stress placement. It cost 1.8 points
+  (62.4%): the trees spent their splits memorizing exact word lengths.
+- **Beam search over whole words.** The model conditions on the phonemes it has already emitted,
+  so decoding greedily is not decoding it correctly, and searching whole-word candidates should
+  help. It does not, for a reason worth knowing: grown to pure leaves the trees have no
+  runners-up to search over, and stopping them earlier to create some cost more accuracy than
+  the search won back, at every stopping point tried (62.0% with search, against 64.2% without).
+- **Schwa reduction** (from the previous rule-based fallback, kept here for the record).
+  Reducing every unstressed vowel to schwa is real English's dominant pattern and the obvious
+  next fix; it made that ruleset *worse* (15.6% to 9.3%).
+
+A joint-sequence n-gram model, or a small neural sequence model, is the next tier up from a
+decision-tree ensemble — at the cost, for the neural option, of the runtime dependency this
+library currently does without.
 
 ## Known limitations
 
-- **Rule-based fallback accuracy, measured, not guessed.** `LetterToSoundRulesBenchmarkTest`
-  runs the fallback against ~860 real CMUdict words it never gets to see the dictionary
-  answer for: **15.6% exact phoneme-sequence match, 30.7% average phoneme error rate** (edit
-  distance per phoneme — so most guesses are "close," not "letter salad," even when not
-  exact). That's a straightforward grapheme scanner, not a trained model — a real accuracy
-  ceiling, not a placeholder. Most of the gains so far came from patterns that matter
-  specifically for *names* rather than common vocabulary — plural/possessive "-s" voicing
-  ("Williams," "Jones" ending in Z not S), context-sensitive "-ed", silent-L in "-alk"/"-alm"
-  — since ordinary dictionary words never actually reach this fallback in real use; only
-  words CMUdict doesn't know do. One genuinely counterintuitive finding from that benchmark:
-  reducing every unstressed vowel to schwa (real English's dominant pattern, and the
-  "obviously correct" next fix) actually made accuracy *worse* (9% exact match) — this
-  dictionary's word mix skews toward non-initial stress often enough that "guess the vowel
-  letter's own sound everywhere" beat "assume the first syllable is stressed." A trained
-  neural fallback (the same dictionary-first, small-seq2seq-model-second pattern used by
-  [g2pE](https://github.com/Kyubyong/g2p)) is the natural next step if this proves too rough
-  in practice.
+- **Stress is the weakest part of the model.** Of the words whose phonemes are entirely right,
+  about one in seven still has a stress mark in the wrong place (64.2% against 54.4%). Audible,
+  but far less damaging to a listener than a wrong consonant.
+- **English only.** The trainer is language-agnostic — it learns from whatever pronunciation
+  dictionary it is given — but the only dictionary bundled here is CMUdict.
 - **No homograph disambiguation.** CMUdict lists multiple pronunciations for words like
   "read" (present vs. past tense); this library always takes the first listed pronunciation.
 - **House-number reading is literal, not colloquial.** "2340" is spelled "two thousand three
@@ -147,7 +198,7 @@ repositories {
 }
 
 dependencies {
-    implementation("com.github.proairface:KotlinG2P:v0.1.0")
+    implementation("com.github.proairface:KotlinG2P:v0.3.0")
 }
 ```
 
@@ -157,8 +208,10 @@ GPG-signed release pipeline, both of which are a real setup step rather than a c
 ## Building
 
 ```bash
-./gradlew test          # run the test suite
-./gradlew build         # build the library jar
+./gradlew test                  # run the test suite, including the accuracy benchmark
+./gradlew build                 # build the library jar
+./gradlew :trainer:evaluateLts  # score the committed model on the held-out split
+./gradlew :trainer:trainLts     # retrain the model from CMUdict (~6s), rewriting the resource
 ```
 
 Needs JDK 17+. No Android dependency — this is a plain Kotlin/JVM library, usable from any JVM

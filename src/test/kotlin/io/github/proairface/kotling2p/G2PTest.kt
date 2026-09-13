@@ -17,10 +17,10 @@ class G2PTest {
     }
 
     @Test
-    fun fallsBackToRulesForUnknownWordsRatherThanFailing() {
+    fun fallsBackToTheModelForUnknownWordsRatherThanFailing() {
         val result = g2p.toPhonemes("zjorvik")
         assertEquals(1, result.size)
-        assertEquals(PronunciationSource.RULES, result.single().source)
+        assertEquals(PronunciationSource.LETTER_TO_SOUND, result.single().source)
         assertTrue(result.single().phonemes.isNotEmpty())
     }
 

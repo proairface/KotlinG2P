@@ -10,7 +10,10 @@ import java.io.BufferedReader
  * disambiguation (e.g. "READ" past vs. present tense) needs part-of-speech context this
  * library doesn't have, so only the first (primary) pronunciation of each word is kept.
  */
-class CmuDict private constructor(private val entries: Map<String, List<Phoneme>>) {
+class CmuDict private constructor(
+    /** Every entry, keyed by uppercase word — iterable so the model trainer can read the corpus. */
+    val entries: Map<String, List<Phoneme>>,
+) {
 
     fun lookup(word: String): List<Phoneme>? = entries[word.uppercase()]
 
