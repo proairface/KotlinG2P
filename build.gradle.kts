@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "io.github.proairface"
-version = "0.4.0"
+version = "0.5.0"
 
 repositories {
     mavenCentral()
@@ -50,6 +50,8 @@ tasks.check {
 val trainingKnobs = listOf(
     "lts.context", "lts.history", "lts.emIterations", "lts.minLeaf", "lts.maxDepth",
     "lts.trees", "lts.featuresPerSplit", "lts.beam", "lts.seed",
+    "lts.stressSuffix", "lts.stressPositionCap", "lts.stressTrees", "lts.stressMinLeaf",
+    "lts.stressMaxDepth", "lts.stressFeaturesPerSplit",
 )
 
 /**

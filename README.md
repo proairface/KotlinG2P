@@ -19,8 +19,9 @@ pieces:
   exact-match lookup of ~135,000 common English words.
 - **A clean-room letter-to-sound model** (trained from scratch on that dictionary, not derived
   from espeak-ng or any other GPL codebase) for words the dictionary doesn't know — mostly
-  proper nouns and place names. It gets **68.0% of unseen words exactly right**, at a 7.7%
-  phoneme error rate; see "Accuracy" below for how that is measured and what it replaced.
+  proper nouns and place names. It gets **68.0% of unseen words' phonemes exactly right**
+  (**59.9%** including stress placement), at a 7.7% phoneme error rate; see "Accuracy" below for
+  how that is measured and what it replaced.
 
 This library was built as the phonemization fallback for
 [Detour](https://github.com/proairface/detour), a delivery-routing app, whose whole problem is
@@ -141,11 +142,11 @@ was **not allowed to see** (`TrainingSplit` holds out one word in twenty, by has
 itself, and the trainer and the benchmark call the same function so they cannot drift apart).
 Training on a dictionary and then scoring on that same dictionary would measure only memory.
 
-| | hand-written rules (v0.2.0) | one tree (v0.3.0) | forest of nine (v0.4.0) |
-|---|---|---|---|
-| word accuracy, ignoring stress | 15.6% | 64.2% | **68.0%** |
-| word accuracy, with stress | — | 54.4% | **58.4%** |
-| phoneme error rate | 30.7% | 9.0% | **7.7%** |
+| | | rules (v0.2.0) | one tree (v0.3.0) | forest of nine (v0.4.0) | + stress correction (v0.5.0) |
+|---|---|---|---|---|
+| word accuracy, ignoring stress | 15.6% | 64.2% | 68.0% | **68.0%** |
+| word accuracy, with stress | — | 54.4% | 58.4% | **59.9%** |
+| phoneme error rate | 30.7% | 9.0% | 7.7% | **7.7%** |
 | model size in the jar | — | 0.2 MB | 1.2 MB |
 | heap held | — | ~1 MB | ~5.8 MB |
 
@@ -160,6 +161,41 @@ mark away, and the consonant skeleton — which is what carries intelligibility 
 always right. What remains wrong is dominated by genuinely under-determined proper nouns, where
 the spelling does not settle it: `acosta` as `AE1 K OW1 S T AH0` against CMUdict's
 `AH0 K AO1 S T AH0`.
+
+### Stress: a second, independent forest
+
+The per-letter forest gets phonemes right far more often than it gets stress right (68.0%
+against 58.4%), and that gap is structural, not a matter of training it harder: every one of its
+trees decides "what does *this letter* say" from a fixed few letters of context, and English
+stress is a property of the *whole word* — how many syllables it has, which one is last, what it
+ends in — that no local window can see.
+
+So v0.5.0 adds a second forest that runs once per vowel, *after* the letter forest has decoded
+the whole word, and only ever changes the stress digit already there — never which phoneme it
+is. Its features are the ones the letter forest structurally lacks: the vowel's index from the
+start and end among the word's other vowels, how many vowels the word has in total, and the
+word's own last five letters (English's stress-shifting suffixes run longer than three letters —
+`-ation`, `-ical`, `-esque` — so the model needs to see that far). Trained the same way as the
+letter forest: nine trees, bootstrap-resampled, voting.
+
+The one feature that mattered most wasn't in that list at first, and leaving it out actively
+made things *worse*: the letter forest's own stress guess for that vowel, made from purely local
+context. Without it, word-with-stress accuracy *fell* to 55.3% despite the new forest scoring
+87.8% per vowel in an isolated test against true phonemes — the local guess turned out to already
+carry real signal a global, position-and-suffix-only model has no way to reconstruct, and
+discarding it lost more than the global features won back. Adding it as an input feature (not
+replacing the letter forest's guess, correcting it) is what took the number from 58.4% to 59.9%.
+
+That feature has to come from the letter forest's own predictions on training words, not the
+ground truth its label is drawn from, or the tree would simply learn to copy a feature that will
+never be that reliable once real decoding is doing the guessing. The same principle already
+governs the letter forest's own phoneme-history feature (trained on the true left context,
+decoded against its own earlier guesses) — applied here the same way: every training word is
+decoded once by the letter forest alone (a real, if throwaway, `LtsModel`, not a
+re-implementation of one) before the stress forest ever sees it. A word whose predicted vowel
+*count* disagrees with its true count is dropped rather than guessed at (908 of 118,714 words) —
+with the wrong number of vowels there is no principled way to say which predicted one a given
+true digit belongs to.
 
 ### Things that were tried and did not work
 
@@ -183,6 +219,12 @@ Recorded because a negative result that isn't written down gets re-attempted:
   features, rather than ten, made the individual trees too weak to vote well: 68.0% down to
   67.7%. The same comparison at fifteen trees is wider (68.9% against 68.0%), so the cost of
   over-randomizing grows with the ensemble rather than washing out.
+- **The stress forest without the letter forest's own guess as a feature.** Covered above in
+  "Stress" in more detail; recorded here too because it is the sharpest surprise in this
+  library's development so far — a component that scored well in isolation (87.8%) made the
+  *whole system* worse (58.4% to 55.3%) once wired in, for a reason (it discarded real signal,
+  not "it was buggy") that only showed up by measuring the isolated and end-to-end numbers side
+  by side.
 - **Schwa reduction** (from the previous rule-based fallback, kept here for the record).
   Reducing every unstressed vowel to schwa is real English's dominant pattern and the obvious
   next fix; it made that ruleset *worse* (15.6% to 9.3%).
@@ -193,9 +235,12 @@ library currently does without.
 
 ## Known limitations
 
-- **Stress is the weakest part of the model.** Of the words whose phonemes are entirely right,
-  about one in seven still has a stress mark in the wrong place (68.0% against 58.4%). Audible,
-  but far less damaging to a listener than a wrong consonant.
+- **Stress is still the weakest part of the model.** Even after the correction forest, of the
+  words whose phonemes are entirely right, about one in six still has a stress mark in the wrong
+  place (68.0% against 59.9%). Audible, but far less damaging to a listener than a wrong
+  consonant — and the ceiling here is capped by the letter forest's own phoneme mistakes as much
+  as by the stress forest itself: an isolated test against *true* phonemes (see "Stress" above)
+  scored 87.8% per vowel, well above what the full pipeline achieves per word.
 - **English only.** The trainer is language-agnostic — it learns from whatever pronunciation
   dictionary it is given — but the only dictionary bundled here is CMUdict.
 - **No homograph disambiguation.** CMUdict lists multiple pronunciations for words like
@@ -224,7 +269,7 @@ repositories {
 }
 
 dependencies {
-    implementation("com.github.proairface:KotlinG2P:v0.4.0")
+    implementation("com.github.proairface:KotlinG2P:v0.5.0")
 }
 ```
 

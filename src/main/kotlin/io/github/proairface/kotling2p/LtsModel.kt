@@ -26,6 +26,47 @@ class FeatureLayout(val contextRadius: Int, val phonemeHistory: Int, val valueSp
 }
 
 /**
+ * Feature layout for the stress-correction model — see [LtsModel]'s "Stress" section below.
+ *
+ * Unlike [FeatureLayout], this does not describe a sliding window over letters. It describes one
+ * *vowel occurrence* in an already-decoded word: the vowel's own identity, where it sits among
+ * the word's other vowels, and the word's own trailing letters. Position and suffix are exactly
+ * the two things the per-letter model structurally cannot see — it only ever looks a fixed few
+ * letters either side — and they are most of what decides English stress: penultimate/final
+ * position, and morphology (`-ity`, `-ic`, `-tion` pull stress to a specific syllable regardless
+ * of what the rest of the word looks like).
+ */
+class StressFeatureLayout(val suffixLength: Int, val positionCap: Int, val valueSpace: Int) {
+    val featureCount: Int = FIXED_FEATURES + suffixLength
+
+    /** Feature slot for the letter this many places from the end of the word (0 = last letter). */
+    fun suffixSlot(offsetFromEnd: Int): Int = FIXED_FEATURES + offsetFromEnd
+
+    companion object {
+        /** The vowel's own identity; its index from the start and end among vowels; how many
+         * vowels the word has in total; and the digit the letter forest already put there. */
+        const val FIXED_FEATURES = 5
+        const val VOWEL_FEATURE = 0
+        const val INDEX_FROM_START = 1
+        const val INDEX_FROM_END = 2
+        const val TOTAL_VOWELS = 3
+
+        /**
+         * The stress digit already on this vowel before correction runs — the letter forest's own
+         * guess, made from purely local context. Without this feature the correction forest
+         * measurably made things *worse* (word-with-stress accuracy 58.4% to 55.3%) despite
+         * scoring 87.8% per vowel in isolation given true phonemes: the letter forest's guess
+         * turned out to already encode real signal (local phonotactic patterns a global,
+         * suffix-and-position-only model has no access to), and discarding it lost more than the
+         * global features won. Trained without leakage — see `Train.kt`'s bootstrap step, which
+         * sources this feature from the letter forest's own predictions on training words, never
+         * from the ground truth the label comes from.
+         */
+        const val PRIOR_STRESS_GUESS = 4
+    }
+}
+
+/**
  * The trained letter-to-sound model: guesses a pronunciation for a word [CmuDict] doesn't have.
  *
  * That case is not an edge case for this library's intended use. A routing app reads out street
@@ -47,6 +88,21 @@ class FeatureLayout(val contextRadius: Int, val phonemeHistory: Int, val valueSp
  *
  * See the trainer's `Aligner` and `TreeTrainer` for how it is built, and `LtsModelBenchmarkTest`
  * for what it scores on words it was never trained on.
+ *
+ * ### Stress
+ *
+ * The per-letter forest gets the phonemes themselves mostly right but stress noticeably less
+ * often — of words whose phonemes are entirely correct, close to one in seven still misplaces a
+ * stress mark. That gap is structural, not a matter of more trees: every tree answers "what does
+ * *this* letter say" from a fixed few letters of context, and English stress is a property of the
+ * *whole word* (how many syllables it has, which one is last, what it ends in) that no local
+ * window can see.
+ *
+ * So stress is corrected in a second pass, by an entirely separate, much smaller forest
+ * ([StressFeatureLayout]) that runs once per vowel *after* the letter forest has decoded the
+ * whole word. It only ever changes the stress digit already on a vowel phoneme — never which
+ * phoneme it is — using exactly the features the letter forest lacks: the vowel's position among
+ * the word's other vowels, and the word's own trailing letters.
  *
  * ### File format
  *
@@ -74,6 +130,16 @@ class FeatureLayout(val contextRadius: Int, val phonemeHistory: Int, val valueSp
  *                                 forward to its "no" child
  *                  a branch's "yes" child is always the node immediately after it, which is why
  *                  only one child index is stored.
+ * stressSuffix     varint, [StressFeatureLayout.suffixLength]
+ * stressPosCap     varint, [StressFeatureLayout.positionCap]
+ * stressValueSpace varint, this section's own packing stride (independent of the letter
+ *                  forest's — the two never share a node table)
+ * stressRoots      varint count, then that many varints: a stress tree's node index plus one,
+ *                  or 0 for a missing tree (never happens in practice, but the encoding allows it)
+ * stressNodes      varint count, then that many nodes, same two-varint pre-order shape as
+ *                  `nodes` above, except a leaf's second varint is not a label index — it *is*
+ *                  the stress digit (0, 1 or 2) — there is no separate label table for this
+ *                  section, since three digits need no interning
  * ```
  */
 class LtsModel private constructor(
@@ -84,6 +150,9 @@ class LtsModel private constructor(
     /** Per label, the history ids of the phonemes it emits, so decoding needs no string work. */
     private val labelHistoryIds: Array<IntArray>,
     private val phonemeBoundary: Int,
+    /** Bare-phoneme name to id, the reverse of [phonemeBoundary]'s vocabulary — needed to turn a
+     * decoded vowel's own identity back into the feature the stress model was trained on. */
+    private val phonemeIds: Map<String, Int>,
     private val roots: IntArray,
     /**
      * Each node's question, or [LEAF]. Held as shorts rather than ints purely for memory: a tag
@@ -93,6 +162,10 @@ class LtsModel private constructor(
      */
     private val nodeTag: ShortArray,
     private val nodePayload: IntArray,
+    private val stressLayout: StressFeatureLayout,
+    private val stressRoots: IntArray,
+    private val stressNodeTag: ShortArray,
+    private val stressNodePayload: IntArray,
 ) {
     /** One past the last real letter id — the value a letter feature takes outside the word. */
     private val letterBoundary = alphabet.length
@@ -150,7 +223,62 @@ class LtsModel private constructor(
         val best = beam.minByOrNull { it.cost } ?: return emptyList()
         val result = ArrayList<Phoneme>(best.labels.size + 2)
         for (label in best.labels) result += labels[label]
-        return result
+        return correctStress(result, ids)
+    }
+
+    /**
+     * Overrides the stress digit on every vowel phoneme in [phonemes] using the stress forest,
+     * leaving which phoneme it is untouched. [letterIds] is the same array [predict] already
+     * built for the word, reused here for the suffix features.
+     */
+    private fun correctStress(phonemes: List<Phoneme>, letterIds: IntArray): List<Phoneme> {
+        if (stressRoots.isEmpty()) return phonemes
+        val vowelPositions = phonemes.indices.filter { phonemes[it].stress != null }
+        if (vowelPositions.isEmpty()) return phonemes
+
+        val total = vowelPositions.size
+        val features = IntArray(stressLayout.featureCount)
+        val corrected = phonemes.toMutableList()
+        vowelPositions.forEachIndexed { index, position ->
+            val phoneme = phonemes[position]
+            features[StressFeatureLayout.VOWEL_FEATURE] = phonemeIds[phoneme.base] ?: phonemeBoundary
+            features[StressFeatureLayout.INDEX_FROM_START] = minOf(index, stressLayout.positionCap)
+            features[StressFeatureLayout.INDEX_FROM_END] = minOf(total - 1 - index, stressLayout.positionCap)
+            features[StressFeatureLayout.TOTAL_VOWELS] = minOf(total, stressLayout.positionCap)
+            // The letter forest's own guess for this vowel, before it gets overwritten below —
+            // see StressFeatureLayout.PRIOR_STRESS_GUESS for why this feature exists at all.
+            features[StressFeatureLayout.PRIOR_STRESS_GUESS] = phoneme.stress ?: 0
+            for (slot in 0 until stressLayout.suffixLength) {
+                val letterIndex = letterIds.size - 1 - slot
+                features[stressLayout.suffixSlot(slot)] =
+                    if (letterIndex in letterIds.indices) letterIds[letterIndex] else letterBoundary
+            }
+            corrected[position] = Phoneme(phoneme.base + voteStress(features))
+        }
+        return corrected
+    }
+
+    private fun voteStress(features: IntArray): Int {
+        val votes = IntArray(3)
+        for (root in stressRoots) {
+            if (root == NO_TREE) continue
+            votes[classifyByFeatures(root, features, stressNodeTag, stressNodePayload, stressLayout.valueSpace)]++
+        }
+        var winner = 0
+        for (digit in 1..2) if (votes[digit] > votes[winner]) winner = digit
+        return winner
+    }
+
+    /** Walks a tree whose questions read directly from a precomputed feature vector, rather than
+     * from a sliding window over a word — the shape [stressRoots]' trees are, unlike [roots]'. */
+    private fun classifyByFeatures(root: Int, features: IntArray, tag: ShortArray, payload: IntArray, valueSpace: Int): Int {
+        var node = root
+        while (true) {
+            val t = tag[node].toInt()
+            if (t == LEAF) return payload[node]
+            val question = t - 1
+            node = if (features[question / valueSpace] == question % valueSpace) node + 1 else payload[node]
+        }
     }
 
     /** One candidate pronunciation of the word so far. [cost] is additive; lower is better. */
@@ -253,9 +381,27 @@ class LtsModel private constructor(
                 // child, a delta because pre-order guarantees the child comes later.
                 nodePayload[node] = if (tag == LEAF) cursor.varint() else node + cursor.varint()
             }
+
+            val stressLayout = StressFeatureLayout(
+                suffixLength = cursor.varint(),
+                positionCap = cursor.varint(),
+                valueSpace = cursor.varint(),
+            )
+            val stressRoots = IntArray(cursor.varint()) { cursor.varint() - 1 }
+            val stressNodeCount = cursor.varint()
+            val stressNodeTag = ShortArray(stressNodeCount)
+            val stressNodePayload = IntArray(stressNodeCount)
+            for (node in 0 until stressNodeCount) {
+                val tag = cursor.varint()
+                require(tag <= Short.MAX_VALUE) { "stress tag $tag does not fit the node table" }
+                stressNodeTag[node] = tag.toShort()
+                stressNodePayload[node] = if (tag == LEAF) cursor.varint() else node + cursor.varint()
+            }
+
             return LtsModel(
-                alphabet, ensembleSize, layout, labels, labelHistoryIds, phonemeCount,
+                alphabet, ensembleSize, layout, labels, labelHistoryIds, phonemeCount, phonemeIds,
                 roots, nodeTag, nodePayload,
+                stressLayout, stressRoots, stressNodeTag, stressNodePayload,
             )
         }
     }

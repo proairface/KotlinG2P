@@ -2,6 +2,8 @@ package io.github.proairface.kotling2p.trainer
 
 import io.github.proairface.kotling2p.FeatureLayout
 import io.github.proairface.kotling2p.LtsModel
+import io.github.proairface.kotling2p.Phoneme
+import io.github.proairface.kotling2p.StressFeatureLayout
 import java.io.File
 
 /**
@@ -101,9 +103,83 @@ fun main(arguments: Array<String>) {
         }
     }
 
-    val stats = ModelWriter.write(output, alphabet, phonemes, layout, forest, chunks)
+    // A second, independent forest corrects stress after the letter forest has decoded a whole
+    // word. It cannot be folded into the per-letter trees above: stress depends on how many
+    // syllables the *whole word* has and where this one falls among them, which a tree that only
+    // ever looks a few letters either side structurally cannot know.
+    val stressLayout = StressFeatureLayout(
+        // 5, not 3: the extra reach measurably helped (58.7% with no suffix at all, 59.8% at 3,
+        // 59.9% at 5, flat beyond). English's stress-bearing suffixes run longer than three
+        // letters ("-ation", "-ical", "-esque"), so the model needs to see that far to use them.
+        suffixLength = intProperty("lts.stressSuffix", 5),
+        positionCap = intProperty("lts.stressPositionCap", 6),
+        valueSpace = maxOf(alphabet.size, phonemes.size, intProperty("lts.stressPositionCap", 6) + 1),
+    )
+    println("stress oracle check (position/suffix signal alone, no prior guess):")
+    reportStressOracleAccuracy(heldOut, alphabet, phonemes, stressLayout)
+
+    // The stress forest needs the letter forest's own guess as a feature (see
+    // StressFeatureLayout.PRIOR_STRESS_GUESS), and that feature has to come from the letter
+    // forest's actual predictions, not the ground truth its label is drawn from — otherwise the
+    // tree just learns to copy a feature that won't be trustworthy at decode time. So every
+    // training word is first decoded by the letter forest alone (stress correction switched off
+    // by handing it an empty stress section), through a real, if throwaway, `LtsModel` — not a
+    // simulation of one, so this sees exactly what real decoding sees, beam search included.
+    val letterOnlyBytes = run {
+        val temp = File.createTempFile("kotling2p-letter-only", ".bin")
+        try {
+            ModelWriter.write(
+                temp, alphabet, phonemes, layout, forest, chunks,
+                StressFeatureLayout(suffixLength = 0, positionCap = 0, valueSpace = 1), emptyList(),
+            )
+            temp.readBytes()
+        } finally {
+            temp.delete()
+        }
+    }
+    val letterOnlyModel = LtsModel.read(letterOnlyBytes.inputStream())
+
+    val stressData = StressExamples.bootstrap(training, letterOnlyModel, alphabet, phonemes, stressLayout)
+    println(
+        "stress examples: ${stressData.labels.size} vowel occurrences from ${training.size} training words " +
+            "(${stressData.skippedWords} skipped: predicted and true vowel counts disagreed)",
+    )
+
+    val stressEnsembleSize = intProperty("lts.stressTrees", 9)
+    val stressSettings = TreeTrainer.Settings(
+        minLeaf = intProperty("lts.stressMinLeaf", 5),
+        minGain = 1e-6,
+        maxDepth = intProperty("lts.stressMaxDepth", 24),
+        featuresPerSplit = intProperty(
+            "lts.stressFeaturesPerSplit",
+            if (stressEnsembleSize == 1) stressLayout.featureCount else stressLayout.featureCount - 1,
+        ),
+    )
+    println("stress settings: ensembleSize=$stressEnsembleSize $stressSettings")
+
+    val stressRandom = kotlin.random.Random(seed - 1)
+    val stressRowCount = stressData.labels.size
+    val stressForest = List(stressEnsembleSize) {
+        val rows = if (stressEnsembleSize == 1) {
+            IntArray(stressRowCount) { it }
+        } else {
+            IntArray(stressRowCount) { stressRandom.nextInt(stressRowCount) }
+        }
+        TreeTrainer(
+            features = stressData.features,
+            labels = stressData.labels,
+            numFeatures = stressLayout.featureCount,
+            valueSpace = stressLayout.valueSpace,
+            numLabels = 3,
+            settings = stressSettings,
+            random = stressRandom,
+        ).train(rows)
+    }
+
+    val stats = ModelWriter.write(output, alphabet, phonemes, layout, forest, chunks, stressLayout, stressForest)
     println(
         "model: ${stats.nodes} nodes (${stats.leaves} leaves), ${stats.labels} labels, " +
+            "stress forest ${stats.stressNodes} nodes (${stats.stressLeaves} leaves), " +
             "%.1f KB at $output".format(stats.bytes / 1024.0),
     )
     println("trained in ${(System.currentTimeMillis() - started) / 1000}s")
@@ -213,6 +289,127 @@ class Examples private constructor(private val perLetter: Array<Letter?>) {
             )
         }
     }
+}
+
+/**
+ * Training rows for the stress-correction forest: one row per vowel occurrence, features as
+ * [StressFeatureLayout] describes, label the vowel's true stress digit (0, 1 or 2) from CMUdict.
+ */
+class StressExamples private constructor(val features: ByteArray, val labels: IntArray, val skippedWords: Int) {
+    companion object {
+        /**
+         * Builds rows from what the letter forest actually predicts for each training word, not
+         * from the alignment's ground truth — see the [StressFeatureLayout.PRIOR_STRESS_GUESS]
+         * doc comment for why that distinction is the whole point.
+         *
+         * A predicted word whose vowel *count* disagrees with the true count is dropped rather
+         * than guessed at: with a different number of vowels there is no principled way to say
+         * which predicted vowel a given true digit belongs to, and forcing a guess would train
+         * on a wrong label rather than an absent one.
+         */
+        fun bootstrap(
+            training: List<Entry>,
+            letterOnlyModel: LtsModel,
+            alphabet: Alphabet,
+            phonemes: PhonemeVocabulary,
+            layout: StressFeatureLayout,
+        ): StressExamples {
+            val featureRows = ArrayList<IntArray>()
+            val labelRows = ArrayList<Int>()
+            var skipped = 0
+
+            for (entry in training) {
+                val predicted = letterOnlyModel.predict(entry.word)
+                val predictedVowels = predicted.indices.filter { predicted[it].stress != null }
+                val trueDigits = entry.phonemes.mapNotNull { Phoneme(it).stress }
+                if (predictedVowels.isEmpty() || predictedVowels.size != trueDigits.size) {
+                    skipped++
+                    continue
+                }
+
+                val total = predictedVowels.size
+                val letterIds = IntArray(entry.word.length) { alphabet.idOf(entry.word[it]) }
+                predictedVowels.forEachIndexed { index, position ->
+                    val phoneme = predicted[position]
+                    val row = IntArray(layout.featureCount)
+                    row[StressFeatureLayout.VOWEL_FEATURE] = phonemes.idOf(phoneme.arpabet)
+                    row[StressFeatureLayout.INDEX_FROM_START] = minOf(index, layout.positionCap)
+                    row[StressFeatureLayout.INDEX_FROM_END] = minOf(total - 1 - index, layout.positionCap)
+                    row[StressFeatureLayout.TOTAL_VOWELS] = minOf(total, layout.positionCap)
+                    row[StressFeatureLayout.PRIOR_STRESS_GUESS] = phoneme.stress ?: 0
+                    for (slot in 0 until layout.suffixLength) {
+                        val letterIndex = letterIds.size - 1 - slot
+                        row[layout.suffixSlot(slot)] = if (letterIndex >= 0) letterIds[letterIndex] else alphabet.boundary
+                    }
+                    featureRows += row
+                    labelRows += trueDigits[index]
+                }
+            }
+
+            val features = ByteArray(labelRows.size * layout.featureCount)
+            for (i in featureRows.indices) {
+                val base = i * layout.featureCount
+                for (f in 0 until layout.featureCount) features[base + f] = featureRows[i][f].toByte()
+            }
+            return StressExamples(features, labelRows.toIntArray(), skipped)
+        }
+    }
+}
+
+/**
+ * Trains and scores a throwaway stress forest on held-out words using their *true* phoneme
+ * sequences, with [StressFeatureLayout.PRIOR_STRESS_GUESS] fixed at a neutral 0 rather than any
+ * real guess — isolating what the position/suffix/identity features alone are worth, decoupled
+ * from both the letter forest's phoneme mistakes and its (real, and stronger — see
+ * [StressFeatureLayout.PRIOR_STRESS_GUESS]) local signal. A diagnostic, not part of the shipped
+ * model: this trains and evaluates on the same held-out words, which is only valid because the
+ * result is never serialized or used for anything but this one printed number.
+ */
+private fun reportStressOracleAccuracy(entries: List<Entry>, alphabet: Alphabet, phonemes: PhonemeVocabulary, layout: StressFeatureLayout) {
+    val rows = ArrayList<IntArray>()
+    val labels = ArrayList<Int>()
+    for (entry in entries) {
+        val vowelPositions = entry.phonemes.indices.filter { Phoneme(entry.phonemes[it]).stress != null }
+        if (vowelPositions.isEmpty()) continue
+        val total = vowelPositions.size
+        val letterIds = IntArray(entry.word.length) { alphabet.idOf(entry.word[it]) }
+        vowelPositions.forEachIndexed { index, position ->
+            val phoneme = entry.phonemes[position]
+            val row = IntArray(layout.featureCount)
+            row[StressFeatureLayout.VOWEL_FEATURE] = phonemes.idOf(phoneme)
+            row[StressFeatureLayout.INDEX_FROM_START] = minOf(index, layout.positionCap)
+            row[StressFeatureLayout.INDEX_FROM_END] = minOf(total - 1 - index, layout.positionCap)
+            row[StressFeatureLayout.TOTAL_VOWELS] = minOf(total, layout.positionCap)
+            for (slot in 0 until layout.suffixLength) {
+                val letterIndex = letterIds.size - 1 - slot
+                row[layout.suffixSlot(slot)] = if (letterIndex >= 0) letterIds[letterIndex] else alphabet.boundary
+            }
+            rows += row
+            labels += Phoneme(phoneme).stress!!
+        }
+    }
+
+    val features = ByteArray(rows.size * layout.featureCount)
+    for (i in rows.indices) for (f in 0 until layout.featureCount) features[i * layout.featureCount + f] = rows[i][f].toByte()
+    val tree = TreeTrainer(
+        features = features,
+        labels = labels.toIntArray(),
+        numFeatures = layout.featureCount,
+        valueSpace = layout.valueSpace,
+        numLabels = 3,
+        settings = TreeTrainer.Settings(minLeaf = 5, minGain = 1e-6, maxDepth = 24, featuresPerSplit = layout.featureCount),
+        random = kotlin.random.Random(0),
+    ).train(IntArray(labels.size) { it })
+
+    var correct = 0
+    for (i in rows.indices) if (classifyNode(tree, rows[i]) == labels[i]) correct++
+    println("  %.1f%% over %d vowels (trained and scored on the same words — a diagnostic ceiling, not a real score)"
+        .format(100.0 * correct / labels.size.coerceAtLeast(1), labels.size))
+}
+
+private fun classifyNode(node: TreeTrainer.Node, features: IntArray): Int = when (node) {
+    is TreeTrainer.Leaf -> node.label
+    is TreeTrainer.Branch -> classifyNode(if (features[node.feature] == node.value) node.yes else node.no, features)
 }
 
 private fun intProperty(name: String, fallback: Int): Int =
