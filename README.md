@@ -284,26 +284,39 @@ The short version:
 - **Compound primary stress on street/place names is now handled**, for the case that matters
   most for an address-reading app. `DutchCompoundSegmenter` finds a word's real-word boundary
   (dictionary-backed, against a bundled OpenTaal wordlist — dual Revised-BSD/CC-BY-3.0) and gives
-  the first constituent its own stress, matching Dutch's default compound-stress rule (Booij:
-  "main stress is in most cases on the first constituent"). A small, hand-verified
+  ONE constituent its own stress, matching Dutch's default compound-stress rule (Booij: "main
+  stress is in most cases on the first constituent"). A small, hand-verified
   `DutchG2P.NAME_STRESS_OVERRIDES` table (currently: juliana, beatrix, wilhelmina) covers opaque
   proper names whose internal stress the default per-syllable heuristic gets wrong — and, because
   it keys on the name itself, it generalizes across every street/place using that name
   ("Julianastraat", "Julianaplein", "Julianalaan" all correctly stress "juliana" the same way,
   where the whole-word `KNOWN_WORDS` approach this replaced needed a separate hand-checked entry
   per compound).
+- **One documented exception to "first constituent": -dam/-meer/-veen/-waard place names.**
+  ANS (the standard reference grammar of Dutch), §1.6.5.1 "De klemtoon in nominale
+  samenstellingen" (revised by Geert Booij, 2020), states that place names ending in these four
+  suffixes are *always* stressed on the LAST constituent instead — Amsterdám, Rotterdám,
+  Heerenvéén — the opposite of the regular rule, while -dorp/-drecht place names (Bátadorp,
+  Bárendrecht) take the regular first-constituent stress. Cross-checked against real Wiktionary
+  IPA for Amsterdam (`/ˌɑm.stərˈdɑm/`) and Rotterdam (`/ˌrɔ.tərˈdɑm/`), which independently
+  confirm final-syllable stress. `DutchCompoundSegmenter` applies this. (This also fixed a real
+  bug: "veen" used to be in the first-constituent suffix list, so "Amstelveen" was stressed on
+  the front — wrong per this rule.)
 - **What's still genuinely unsolved**: secondary stress. Real Dutch compounds often carry a
-  secondary stress on later constituents (e.g. "aangekomen" stresses both syllables), but this is
-  inconsistent in ways not yet understood (two words with the same vowel count, "kerkstraat" vs.
-  "aangekomen"/"rotterdam", stress differently) — deliberately NOT implemented here, after an
-  earlier "stress every non-schwa vowel" attempt was tried and rejected by ear for badly
-  over-stressing longer words. Trailing constituents of a segmented compound are left unstressed
+  secondary stress on their non-primary constituent (e.g. Wiktionary marks Amsterdam/Rotterdam
+  with both primary and secondary stress, and "aangekomen" — not a compound at all, a participle —
+  stresses both syllables too), but ANS's own compound examples mark only primary stress, and
+  ordinary compounds on Wiktionary (voetbal, brandweer, hoofdstad) show no secondary mark either —
+  whether that reflects a real phonetic difference from place-name compounds, or just inconsistent
+  transcription convention, isn't resolved. Deliberately NOT implemented here, after an earlier
+  "stress every non-schwa vowel" attempt was tried and rejected by ear for badly over-stressing
+  longer words. Trailing (non-primary) constituents of a segmented compound are left unstressed
   entirely rather than guessing. And the segmenter/override approach only covers what it's been
-  checked against: an arbitrary compound whose suffix isn't in `DutchCompoundSegmenter`'s small
-  curated `PLACE_SUFFIXES` list, or a proper name not in `NAME_STRESS_OVERRIDES`, still falls back
-  to the old first-non-schwa-vowel default and can still get stress wrong. For a library whose
-  whole reason to exist is pronouncing arbitrary street names, this remains a real gap, not a
-  footnote — just a narrower one than before.
+  checked against: an arbitrary compound whose suffix isn't in `DutchCompoundSegmenter`'s curated
+  suffix lists, or a proper name not in `NAME_STRESS_OVERRIDES`, still falls back to the old
+  first-non-schwa-vowel default and can still get stress wrong. For a library whose whole reason
+  to exist is pronouncing arbitrary street names, this remains a real gap, not a footnote — just a
+  narrower one than before.
 - **Never tried on-device.** Verified only through a desktop `onnxruntime` harness against the
   real `nl_NL-pim-medium` Piper voice (CC0) — the same caveat English's own pipeline had before
   its on-device verification.

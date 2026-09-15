@@ -11,11 +11,12 @@ package io.github.proairface.kotling2p
  * repo's own `LICENSE.txt`, not assumed).
  *
  * Two-stage strategy:
- * 1. A small, closed, hand-picked list of Dutch place/street-name suffixes ([PLACE_SUFFIXES]) is
- *    tried first. Many real compound street names ("Kerkstraat", "Hoofdweg", "Julianalaan") are
- *    themselves individually listed as OpenTaal headwords, which would otherwise make stage 2
- *    treat them as a single atomic word instead of finding the boundary — exactly backwards for
- *    the purpose here. This directly targets the case that matters most for a routing app.
+ * 1. A small, closed, hand-picked list of Dutch place/street-name suffixes ([PLACE_SUFFIXES], plus
+ *    the reversed-stress [FINAL_STRESS_PLACE_SUFFIXES]) is tried first. Many real compound street
+ *    names ("Kerkstraat", "Hoofdweg", "Julianalaan") are themselves individually listed as
+ *    OpenTaal headwords, which would otherwise make stage 2 treat them as a single atomic word
+ *    instead of finding the boundary — exactly backwards for the purpose here. This directly
+ *    targets the case that matters most for a routing app.
  * 2. A dictionary-based dynamic-programming segmenter that finds the split into the FEWEST real
  *    dictionary-word pieces, allowing a single short linking segment (tussenklank: s/e/en/er)
  *    between two real words — the standard Dutch compounding pattern (verkeer+s+informatie).
@@ -30,30 +31,57 @@ internal object DutchCompoundSegmenter {
     private const val MIN_WORD_LEN = 3
     private val LINKERS = listOf("s", "e", "en", "er")
 
-    // NOT "dam", "berg", "dorp", "stad": tried once and caused real damage (Amsterdam ->
-    // "amster"+"dam", Rotterdam -> "rotter"+"dam" -- "Amster"/"Rotter" are not real standalone
-    // Dutch words, even though the wrong split happens to still land on roughly the right stress
-    // for these two specific well-known cities by coincidence). Left out until each can be
-    // checked properly rather than assumed safe by analogy to the others.
+    // NOT "berg", "stad": no source found confirming which stress class they belong to (unlike
+    // the suffixes below, all individually confirmed against ANS 1.6.5.1 "De klemtoon in
+    // nominale samenstellingen", revised by Geert Booij, September 2020) -- left out rather than
+    // assumed safe by analogy.
     private val PLACE_SUFFIXES = listOf(
         "straat", "laan", "weg", "plein", "gracht", "dijk", "kade", "singel", "hof", "hout",
         "dreef", "steeg", "erf", "park", "baan", "pad", "markt", "kwartier", "buurt", "wijk",
-        "veen",
+        // ANS 1.6.5.1 example (11b): place names ending in -dorp/-drecht take REGULAR
+        // first-constituent stress (Bátadorp, Betóndorp; Bárendrecht, Dórdrecht) -- same rule as
+        // the ordinary street suffixes above.
+        "dorp", "drecht",
     )
 
-    /** Real-word constituents of [word], in order. Returns `[word]` unchanged if no split was found. */
-    fun constituents(word: String, dictionary: Set<String>): List<String> {
+    // ANS 1.6.5.1 example (11a), citing Köhnlein (2015): place names ending in these four
+    // suffixes are ALWAYS stressed on the SECOND part -- Amsterdám, Rotterdám, Schiedám,
+    // Zaandám; IJsselméér; Heerenvéén, Hoogevéén; Heerhugowáárd -- the OPPOSITE of ordinary
+    // compound stress and of the other suffixes above. Cross-checked against real Wiktionary
+    // IPA for Amsterdam (/ˌɑm.stərˈdɑm/) and Rotterdam (/ˌrɔ.tərˈdɑm/), which independently
+    // confirm final-syllable primary stress.
+    //
+    // "veen" used to be listed in PLACE_SUFFIXES (first-constituent stress) -- that was a real
+    // bug, giving "amstelveen" the wrong stress (ˈɑmstɛlveːn instead of ...ˈveːn); fixed here.
+    private val FINAL_STRESS_PLACE_SUFFIXES = listOf("dam", "meer", "veen", "waard")
+
+    /** A compound's real-word constituents plus which one carries the word's primary stress. */
+    internal data class Segmentation(val constituents: List<String>, val primaryStressIndex: Int)
+
+    /**
+     * Splits [word] into real-word constituents and says which one is stressed. A single-element
+     * result (`constituents == [word]`) means no split was found.
+     */
+    fun segment(word: String, dictionary: Set<String>): Segmentation {
+        for (suffix in FINAL_STRESS_PLACE_SUFFIXES) {
+            if (word.endsWith(suffix) && word.length > suffix.length + 2) {
+                val prefix = word.substring(0, word.length - suffix.length)
+                val parts = genericConstituents(prefix, dictionary) + suffix
+                return Segmentation(parts, parts.size - 1)
+            }
+        }
         for (suffix in PLACE_SUFFIXES) {
             if (word.endsWith(suffix) && word.length > suffix.length + 2) {
                 val prefix = word.substring(0, word.length - suffix.length)
-                return genericConstituents(prefix, dictionary) + suffix
+                val parts = genericConstituents(prefix, dictionary) + suffix
+                return Segmentation(parts, 0)
             }
         }
-        return genericConstituents(word, dictionary)
+        return Segmentation(genericConstituents(word, dictionary), 0)
     }
 
     private fun genericConstituents(word: String, dictionary: Set<String>): List<String> {
-        val split = segment(word, dictionary) ?: return listOf(word)
+        val split = dpSplit(word, dictionary) ?: return listOf(word)
         val out = mutableListOf<String>()
         for ((piece, isReal) in split) {
             if (isReal) {
@@ -72,7 +100,7 @@ internal object DutchCompoundSegmenter {
      * The split of [word] into the fewest real dictionary-word pieces (ties broken by fewest
      * total pieces, including linkers), or `null` if no multi-piece decomposition exists.
      */
-    private fun segment(word: String, dictionary: Set<String>): List<Piece>? {
+    private fun dpSplit(word: String, dictionary: Set<String>): List<Piece>? {
         val n = word.length
         val memo = arrayOfNulls<Best?>(n + 1)
         val computed = BooleanArray(n + 1)

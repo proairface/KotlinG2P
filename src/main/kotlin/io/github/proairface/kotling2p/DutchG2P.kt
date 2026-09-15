@@ -53,14 +53,20 @@ import java.io.InputStream
  * - **Compound primary-stress boundaries**, for the specific case that matters most for a
  *   routing app: street/place-name compounds ("Kerkstraat", "Julianalaan"). [DutchCompoundSegmenter]
  *   finds the real-word split (dictionary-backed, against a bundled OpenTaal wordlist) and gives
- *   ONLY the first constituent's own stress — the rest is deliberately left unstressed rather
- *   than guessing at secondary stress (see the section above: that guess was tried and rejected).
- *   A small, individually hand-verified [NAME_STRESS_OVERRIDES] table covers opaque proper names
- *   whose internal stress the default heuristic gets wrong (checked against real espeak-ng
- *   output for verification only) — three entries so far (juliana, beatrix, wilhelmina), added
- *   only after confirming each actually needs it. This does NOT generalize to arbitrary compounds
- *   or arbitrary proper names; any address this hasn't specifically been checked against remains
- *   a plausible source of wrong stress, same caveat as above, just narrower in scope now.
+ *   ONLY one constituent its own stress — the rest is deliberately left unstressed rather than
+ *   guessing at secondary stress (see the section above: that guess was tried and rejected). Which
+ *   constituent is normally the first (the regular rule), but the segmenter knows one real,
+ *   sourced exception: place names ending in -dam/-meer/-veen/-waard are stressed on the LAST
+ *   constituent instead (Amsterdám, Rotterdám, Heerenvéén — confirmed against ANS 1.6.5.1 "De
+ *   klemtoon in nominale samenstellingen" §11a, revised by Geert Booij, and cross-checked against
+ *   real Wiktionary IPA for Amsterdam/Rotterdam), while -dorp/-drecht place names take the regular
+ *   first-constituent stress (§11b). A small, individually hand-verified [NAME_STRESS_OVERRIDES]
+ *   table covers opaque proper names whose internal stress the default heuristic gets wrong
+ *   (checked against real espeak-ng output for verification only) — three entries so far (juliana,
+ *   beatrix, wilhelmina), added only after confirming each actually needs it. None of this
+ *   generalizes beyond what it's specifically been checked against; any address outside these
+ *   curated lists remains a plausible source of wrong stress, same caveat as above, just narrower
+ *   in scope now.
  *
  * None of this has been tried on-device, only through a desktop `onnxruntime` harness against
  * the real `nl_NL-pim-medium` Piper voice (CC0) — same caveat [G2P]'s own English pipeline had
@@ -109,20 +115,22 @@ class DutchG2P(
 
     /**
      * Splits [word] into real-word constituents via [DutchCompoundSegmenter] when it's not a
-     * [KNOWN_WORDS] entry. A genuine split (2+ constituents) keeps only the FIRST constituent's
-     * own stress as the word's primary stress — matching Dutch's default compound-stress rule
-     * (Booij: main stress falls on the first constituent in most cases) — and suppresses stress
-     * on every later constituent entirely, rather than guessing at secondary stress (see the
-     * class doc comment for why that guess was tried and rejected). No split found (the segmenter
-     * returns the word unchanged) falls back to the existing single-word behavior.
+     * [KNOWN_WORDS] entry. A genuine split (2+ constituents) keeps only ONE constituent's own
+     * stress as the word's primary stress and suppresses stress on every other constituent
+     * entirely, rather than guessing at secondary stress (see the class doc comment for why that
+     * guess was tried and rejected). Which constituent that is comes from the segmenter: the
+     * FIRST one by default (Booij: main stress falls on the first constituent in most cases), but
+     * the LAST one for the small class of place names the segmenter knows takes reversed stress
+     * (ANS 1.6.5.1's -dam/-meer/-veen/-waard rule — see [DutchCompoundSegmenter]). No split found
+     * (the segmenter returns the word unchanged) falls back to the existing single-word behavior.
      */
     private fun transcribeCompoundAware(word: String): List<Pair<String, Int>> {
-        val constituents = DutchCompoundSegmenter.constituents(word, compoundDictionary)
-        if (constituents.size < 2) return predictOrOverride(word)
+        val segmentation = DutchCompoundSegmenter.segment(word, compoundDictionary)
+        if (segmentation.constituents.size < 2) return predictOrOverride(word)
 
-        return constituents.mapIndexed { index, constituent ->
+        return segmentation.constituents.mapIndexed { index, constituent ->
             val symbols = predictOrOverride(constituent)
-            if (index == 0) symbols else symbols.map { (ipa, _) -> ipa to 0 }
+            if (index == segmentation.primaryStressIndex) symbols else symbols.map { (ipa, _) -> ipa to 0 }
         }.flatten()
     }
 

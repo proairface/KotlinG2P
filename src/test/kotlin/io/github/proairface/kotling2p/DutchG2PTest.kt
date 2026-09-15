@@ -84,11 +84,24 @@ class DutchG2PTest {
 
     @Test
     fun `a compound whose suffix could itself be mistaken for a dictionary word still splits`() {
-        // "amstelveen" = amstel + veen: exercises the PLACE_SUFFIXES pre-pass, since
+        // "amstelveen" = amstel + veen: exercises the FINAL_STRESS_PLACE_SUFFIXES pre-pass, since
         // "amstelveen" is itself individually listed in the bundled wordlist (it's a real town),
         // which would otherwise make the general fewest-real-pieces segmenter treat it as one
-        // atomic piece instead of finding the boundary.
-        assertEquals("ˈɑmstɛlveːn", g2p.toEspeakIpa("amstelveen"))
+        // atomic piece instead of finding the boundary. Stress lands on "veen", not "amstel" --
+        // per ANS 1.6.5.1 (11a), place names ending in -veen (like -dam/-meer/-waard) are always
+        // stressed on the second part, confirmed against real Wiktionary IPA for Amsterdam/
+        // Rotterdam.
+        assertEquals("ɑmstɛlvˈeːn", g2p.toEspeakIpa("amstelveen"))
+    }
+
+    @Test
+    fun `-dam place names are stressed on the second part, not the first`() {
+        // ANS 1.6.5.1 (11a), cross-checked against real Wiktionary IPA: Amsterdam
+        // /ˌɑm.stərˈdɑm/, Rotterdam /ˌrɔ.tərˈdɑm/ -- both stress the final syllable. "amster" and
+        // "rotter" aren't real standalone Dutch words, but the suffix match alone drives the
+        // split (same as any other PLACE_SUFFIXES case), so that's not required.
+        assertEquals("ɑmstərdˈɑm", g2p.toEspeakIpa("amsterdam"))
+        assertEquals("rɔtərdˈɑm", g2p.toEspeakIpa("rotterdam"))
     }
 
     @Test
