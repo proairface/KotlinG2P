@@ -338,7 +338,10 @@ The short version:
 
 Secondary stress, and the two opaque-name/inconsistent-secondary-stress sub-problems above, are
 the remaining genuine unsolved pieces. If you want to pick either up, or have ideas, please open
-an issue.
+an issue. **See [`docs/DUTCH-G2P-HANDOVER.md`](docs/DUTCH-G2P-HANDOVER.md) for the fuller research
+trail** — sources cited, what was tried and rejected (including a real audio A/B test of a
+secondary-stress attempt), and what's still open — written for continuity across sessions, not
+just as a summary.
 
 ## License
 
