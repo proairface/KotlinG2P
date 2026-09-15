@@ -1,8 +1,11 @@
 # KotlinG2P
 
-Espeak-free English grapheme-to-phoneme (G2P) library for Kotlin/JVM — CMUdict lookup plus a
-letter-to-sound model trained on that dictionary, for on-device TTS. No espeak-ng, no GPL,
-anywhere in the dependency tree, and no dependencies at all at runtime.
+Espeak-free grapheme-to-phoneme (G2P) library for Kotlin/JVM, for on-device TTS. No espeak-ng,
+no GPL, anywhere in the dependency tree, and no dependencies at all at runtime.
+
+English (`G2P`) is the mature path: CMUdict lookup plus a letter-to-sound model trained on that
+dictionary. Dutch (`DutchG2P`) is new and **experimental** — see its own section below and its
+class doc comment before relying on it.
 
 ## Why this exists
 
@@ -241,8 +244,9 @@ library currently does without.
   consonant — and the ceiling here is capped by the letter forest's own phoneme mistakes as much
   as by the stress forest itself: an isolated test against *true* phonemes (see "Stress" above)
   scored 87.8% per vowel, well above what the full pipeline achieves per word.
-- **English only.** The trainer is language-agnostic — it learns from whatever pronunciation
-  dictionary it is given — but the only dictionary bundled here is CMUdict.
+- **English is the mature path.** The trainer is language-agnostic — it learns from whatever
+  pronunciation dictionary it is given, and a Dutch model now exists too — but see "Dutch
+  (experimental)" below for how much less mature that path is.
 - **No homograph disambiguation.** CMUdict lists multiple pronunciations for words like
   "read" (present vs. past tense); this library always takes the first listed pronunciation.
 - **House-number reading is literal, not colloquial.** "2340" is spelled "two thousand three
@@ -253,10 +257,64 @@ library currently does without.
   conventions (e.g. Kokoro/misaki's). Pairing this with a specific neural voice may need
   extra alignment work.
 
+## Dutch (experimental)
+
+```kotlin
+val g2p = DutchG2P()
+println(g2p.toEspeakIpa("je bent aangekomen."))
+// jə bˈɛnt ˈaːnɣəkˌoːmən.
+```
+
+Built the same way English was — a letter-to-sound model trained on a real dictionary, zero
+espeak-ng in the training data or runtime path — but far less mature, and shipped here anyway
+because an honest, working, imperfect start is more useful than nothing while the real fix gets
+built. **Read [`DutchG2P`'s class doc comment](src/main/kotlin/io/github/proairface/kotling2p/DutchG2P.kt)
+in full before using it.**
+
+The short version:
+
+- **What's solid** (checked by ear, iteratively, against a real and growing test set): common
+  words, the well-known "-en" verb-ending alternation, a handful of homograph-like function
+  words ("een" the article vs. the number, etc.), sentence-level prosody (function words
+  destressed, sentence-ending punctuation preserved as a pause cue — without both, even a
+  correctly-phonemized sentence sounds like a flat, word-by-word list), and the diphthong
+  symbol-encoding fix (WikiPron's own IPA notation used a different Unicode encoding than what
+  the target espeak-trained voices actually expect, which was silently corrupting several
+  diphthongs).
+- **What's genuinely unsolved**: compound stress. This model has no notion of where a compound
+  word's parts begin, so it defaults every word to a single stress on its first non-schwa vowel
+  — right for simple words, wrong for real compounds, confirmed directly (the same name stresses
+  differently depending on what follows it: "Julianastraat" vs. "Julianaplein"). A handful of
+  specific words were checked by ear and hand-corrected (`DutchG2P.KNOWN_WORDS`); this does
+  **not** generalize, and any address or place name outside that list is a plausible source of a
+  wrong stress placement. For a library whose whole reason to exist is pronouncing arbitrary
+  street names, this is a real gap, not a footnote.
+- **Never tried on-device.** Verified only through a desktop `onnxruntime` harness against the
+  real `nl_NL-pim-medium` Piper voice (CC0) — the same caveat English's own pipeline had before
+  its on-device verification.
+- **Why not use espeak-ng's real output to fix the compound-stress problem?** It would
+  — a variant that did this was built and compared by ear during development, and sounded
+  clearly better on several fronts. It was not adopted. This project's entire premise is
+  avoiding GPLv3 espeak-ng entanglement in a shipped, commercially-distributed app, and training
+  a model on espeak-ng's own output raises a real, unresolved question about whether that
+  entanglement follows into the resulting model — not one this project is positioned to answer
+  on its own, and not worth risking the whole reason KotlinG2P exists over. See
+  `trainer/dutch/README.md` for the fuller account and `trainer/dutch/prepare_corpus.py` for
+  exactly where real espeak-ng output was used, strictly for verification, never as training
+  data.
+
+The real fix for the compound-stress problem is a genuine, separate piece of work: a Dutch
+compound-word segmenter (so stress can be assigned per morpheme, the way real Dutch stress
+actually works) built from freely-licensed resources and, ideally, documented linguistic rules
+for Dutch stress assignment rather than another tool's output — not started yet. If you want to
+pick this up, or have ideas, please open an issue.
+
 ## License
 
 Apache-2.0 (see `LICENSE`). The bundled CMUdict data keeps its own BSD-style license from
-Carnegie Mellon University — see `src/main/resources/cmudict/LICENSE`.
+Carnegie Mellon University — see `src/main/resources/cmudict/LICENSE`. The Dutch model is
+trained on WikiPron's Dutch export, itself mined from Wiktionary — see `trainer/dutch/README.md`
+for that data's own license.
 
 ## Installation
 

@@ -81,3 +81,22 @@ val evaluateLts by tasks.registering(JavaExec::class) {
     classpath = trainer.runtimeClasspath
     maxHeapSize = "2g"
 }
+
+/**
+ * Rebuilds `src/main/resources/lts/dutch-model.bin` from a WikiPron-derived corpus. EXPERIMENTAL
+ * — see [io.github.proairface.kotling2p.DutchG2P]'s doc comment before relying on this.
+ *
+ * The corpus itself (`option_a.tsv`) is not produced by this build — see
+ * `trainer/dutch/prepare_corpus.py` and its own README.
+ */
+val trainDutch by tasks.registering(JavaExec::class) {
+    group = "kotling2p"
+    description = "Train the Dutch letter-to-sound model (experimental) and write it into the library's resources."
+    mainClass.set("io.github.proairface.kotling2p.trainer.TrainDutchKt")
+    classpath = trainer.runtimeClasspath
+    maxHeapSize = "4g"
+    args = listOf("trainer/dutch/option_a.tsv", file("src/main/resources/lts/dutch-model.bin").absolutePath)
+    for (knob in trainingKnobs) {
+        System.getProperty(knob)?.let { systemProperty(knob, it) }
+    }
+}
