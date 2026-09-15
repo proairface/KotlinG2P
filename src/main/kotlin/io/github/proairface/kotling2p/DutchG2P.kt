@@ -50,6 +50,17 @@ import java.io.InputStream
  *   voices expect (plain `ɪ`, `ʊ`, `y`) — this was silently corrupting diphthongs in words like
  *   "nieuwendijk" (dropped final consonants, an extra glide-like sound) until the phoneme map
  *   was corrected; see `dutch-phoneme-map.tsv`.
+ * - **Compound primary-stress boundaries**, for the specific case that matters most for a
+ *   routing app: street/place-name compounds ("Kerkstraat", "Julianalaan"). [DutchCompoundSegmenter]
+ *   finds the real-word split (dictionary-backed, against a bundled OpenTaal wordlist) and gives
+ *   ONLY the first constituent's own stress — the rest is deliberately left unstressed rather
+ *   than guessing at secondary stress (see the section above: that guess was tried and rejected).
+ *   A small, individually hand-verified [NAME_STRESS_OVERRIDES] table covers opaque proper names
+ *   whose internal stress the default heuristic gets wrong (checked against real espeak-ng
+ *   output for verification only) — three entries so far (juliana, beatrix, wilhelmina), added
+ *   only after confirming each actually needs it. This does NOT generalize to arbitrary compounds
+ *   or arbitrary proper names; any address this hasn't specifically been checked against remains
+ *   a plausible source of wrong stress, same caveat as above, just narrower in scope now.
  *
  * None of this has been tried on-device, only through a desktop `onnxruntime` harness against
  * the real `nl_NL-pim-medium` Piper voice (CC0) — same caveat [G2P]'s own English pipeline had
@@ -61,6 +72,7 @@ import java.io.InputStream
 class DutchG2P(
     private val model: LtsModel = loadBundledModel(),
     private val tokenToIpa: Map<String, String> = loadBundledPhonemeMap(),
+    private val compoundDictionary: Set<String> = loadBundledWordlist(),
 ) {
 
     /**
@@ -83,12 +95,7 @@ class DutchG2P(
 
     private fun transcribeWord(word: String): String {
         val destress = word in UNSTRESSED_FUNCTION_WORDS
-        val known = KNOWN_WORDS[word]
-        val symbols = known ?: model.predict(word).map { phoneme ->
-            val ipa = tokenToIpa[phoneme.base]
-                ?: error("unknown token '${phoneme.base}' for word '$word' — the model and phoneme map are out of sync")
-            ipa to (phoneme.stress ?: 0)
-        }
+        val symbols = KNOWN_WORDS[word] ?: transcribeCompoundAware(word)
         return symbols.joinToString("") { (ipa, stress) ->
             val marker = when {
                 destress -> ""
@@ -100,6 +107,32 @@ class DutchG2P(
         }
     }
 
+    /**
+     * Splits [word] into real-word constituents via [DutchCompoundSegmenter] when it's not a
+     * [KNOWN_WORDS] entry. A genuine split (2+ constituents) keeps only the FIRST constituent's
+     * own stress as the word's primary stress — matching Dutch's default compound-stress rule
+     * (Booij: main stress falls on the first constituent in most cases) — and suppresses stress
+     * on every later constituent entirely, rather than guessing at secondary stress (see the
+     * class doc comment for why that guess was tried and rejected). No split found (the segmenter
+     * returns the word unchanged) falls back to the existing single-word behavior.
+     */
+    private fun transcribeCompoundAware(word: String): List<Pair<String, Int>> {
+        val constituents = DutchCompoundSegmenter.constituents(word, compoundDictionary)
+        if (constituents.size < 2) return predictOrOverride(word)
+
+        return constituents.mapIndexed { index, constituent ->
+            val symbols = predictOrOverride(constituent)
+            if (index == 0) symbols else symbols.map { (ipa, _) -> ipa to 0 }
+        }.flatten()
+    }
+
+    private fun predictOrOverride(constituent: String): List<Pair<String, Int>> =
+        NAME_STRESS_OVERRIDES[constituent] ?: model.predict(constituent).map { phoneme ->
+            val ipa = tokenToIpa[phoneme.base]
+                ?: error("unknown token '${phoneme.base}' for constituent '$constituent' — the model and phoneme map are out of sync")
+            ipa to (phoneme.stress ?: 0)
+        }
+
     // WikiPron's "ɑu̯" diphthong (koud, rauw, nou...) uses a different NUCLEUS vowel than what
     // espeak/Piper actually use for the same sound (ʌʊ, confirmed against real espeak output for
     // verification only) -- not just an offglide notation difference like the other three, so it
@@ -110,11 +143,23 @@ class DutchG2P(
     companion object {
         private const val MODEL_RESOURCE_PATH = "lts/dutch-model.bin"
         private const val PHONEME_MAP_RESOURCE_PATH = "lts/dutch-phoneme-map.tsv"
+        private const val WORDLIST_RESOURCE_PATH = "lts/dutch-wordlist.txt"
 
         private fun loadBundledModel(): LtsModel {
             val stream: InputStream = DutchG2P::class.java.classLoader.getResourceAsStream(MODEL_RESOURCE_PATH)
                 ?: error("$MODEL_RESOURCE_PATH not found on the classpath")
             return stream.use { LtsModel.read(it) }
+        }
+
+        /** Plain newline-separated text, not a serialized set — see [loadBundledPhonemeMap]'s
+         * own note on why this library avoids a real parser dependency for flat data. Backs
+         * [DutchCompoundSegmenter]; see that class's doc comment for the data source and license
+         * (OpenTaal, dual Revised-BSD/CC-BY-3.0) and `trainer/dutch/prepare_wordlist.py` for how
+         * it was filtered down from OpenTaal's raw ~414k-entry list. */
+        private fun loadBundledWordlist(): Set<String> {
+            val stream = DutchG2P::class.java.classLoader.getResourceAsStream(WORDLIST_RESOURCE_PATH)
+                ?: error("$WORDLIST_RESOURCE_PATH not found on the classpath")
+            return stream.bufferedReader().useLines { lines -> lines.filter { it.isNotBlank() }.toHashSet() }
         }
 
         /** Plain "token\tipa" lines, not JSON — this library has no runtime dependencies and a
@@ -157,10 +202,24 @@ class DutchG2P(
             "aangekomen" to listOf(
                 "aː" to 1, "n" to 0, "ɣ" to 0, "ə" to 0, "k" to 0, "oː" to 2, "m" to 0, "ə" to 0, "n" to 0,
             ),
-            // Verified for THIS specific word only -- does not generalize (see the class doc
-            // comment's compound-stress section; "julianaplein" stresses a different syllable).
-            "julianalaan" to listOf(
-                "j" to 0, "y" to 2, "l" to 0, "i" to 0, "aː" to 1, "n" to 0, "aː" to 0, "l" to 2, "aː" to 0, "n" to 0,
+        )
+
+        /**
+         * Hand-verified overrides for opaque proper names whose internal stress
+         * [DutchCompoundSegmenter]'s default per-constituent heuristic (first non-schwa vowel)
+         * gets wrong. Checked individually against real espeak-ng output (verification only,
+         * never training data) — each entry here was confirmed to actually need one; several
+         * other candidate names (Maxima, Willem, Alexander, Emma) were checked and found to
+         * already stress correctly under the default heuristic, so they're deliberately absent.
+         * Reusable across every compound using that name (e.g. "julianalaan", "julianaplein",
+         * "julianastraat" all reuse this "juliana" entry) — a real generalization over patching
+         * each compound individually the way [KNOWN_WORDS] does.
+         */
+        internal val NAME_STRESS_OVERRIDES: Map<String, List<Pair<String, Int>>> = mapOf(
+            "juliana" to listOf("j" to 0, "y" to 2, "l" to 0, "i" to 0, "aː" to 1, "n" to 0, "aː" to 0),
+            "beatrix" to listOf("b" to 0, "ə" to 0, "ɑ" to 1, "t" to 0, "r" to 0, "ɪ" to 0, "k" to 0, "s" to 0),
+            "wilhelmina" to listOf(
+                "ʋ" to 0, "ɪ" to 2, "l" to 0, "h" to 0, "ɛ" to 0, "l" to 0, "m" to 0, "i" to 1, "n" to 0, "aː" to 0,
             ),
         )
 

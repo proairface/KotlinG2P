@@ -2,9 +2,10 @@
 
 Read [`DutchG2P`'s doc comment](../../src/main/kotlin/io/github/proairface/kotling2p/DutchG2P.kt)
 before using anything here. This directory holds the training corpus for the Dutch
-letter-to-sound model; it is not needed at runtime or by a normal build.
+letter-to-sound model, and the wordlist `DutchCompoundSegmenter` bundles; neither is needed at
+runtime by a normal build.
 
-## Regenerating
+## Regenerating the letter-to-sound corpus
 
 ```bash
 git clone --depth 1 https://github.com/CUNY-CL/wikipron.git /tmp/wikipron
@@ -17,6 +18,18 @@ cd ../..
 and why (junk entries, conflicting pronunciations, a handful of hand-verified number/function-word
 overrides, the offglide symbol-encoding fix) — read it before changing anything here.
 
+## Regenerating the compound-segmenter wordlist
+
+```bash
+git clone --depth 1 https://github.com/OpenTaal/opentaal-wordlist.git /tmp/opentaal-wordlist
+python3 prepare_wordlist.py /tmp/opentaal-wordlist/wordlist.txt
+```
+
+`prepare_wordlist.py`'s own docstring explains the filtering (multi-word entries, non-alphabetic
+entries, and short words all dropped) and why the full `wordlist.txt` is used rather than the
+smaller `elements/basiswoorden-gekeurd.txt`, which lacks the proper names
+(Juliana, Beatrix, Amstel, Wilhelmina...) street/place-name compounds are built from.
+
 ## Data source and license
 
 [WikiPron](https://github.com/CUNY-CL/wikipron) (Apache-2.0 tool) mines pronunciation data from
@@ -26,6 +39,10 @@ pattern CMUdict's BSD-style data already has alongside this project's Apache-2.0
 
 `option_a.tsv` in this directory is the *canonicalized* corpus `prepare_corpus.py` produces —
 not WikiPron's raw export — committed for reproducibility.
+
+[OpenTaal's wordlist](https://github.com/OpenTaal/opentaal-wordlist) is dual-licensed Revised BSD
+/ CC-BY-3.0 (confirmed against the repo's own `LICENSE.txt`) — no copyleft/share-alike
+obligation, commercial use fine with attribution.
 
 ## What espeak-ng was, and was not, used for
 
