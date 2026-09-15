@@ -1,10 +1,19 @@
 plugins {
     kotlin("jvm") version "2.0.21"
     `java-library`
+    `maven-publish`
 }
 
 group = "io.github.proairface"
-version = "0.5.0"
+version = "0.6.0"
+
+publishing {
+    publications {
+        create<MavenPublication>("maven") {
+            from(components["java"])
+        }
+    }
+}
 
 repositories {
     mavenCentral()
