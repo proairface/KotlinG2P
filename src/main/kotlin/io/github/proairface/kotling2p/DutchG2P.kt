@@ -61,12 +61,16 @@ import java.io.InputStream
  *   klemtoon in nominale samenstellingen" §11a, revised by Geert Booij, and cross-checked against
  *   real Wiktionary IPA for Amsterdam/Rotterdam), while -dorp/-drecht place names take the regular
  *   first-constituent stress (§11b). A small, individually hand-verified [NAME_STRESS_OVERRIDES]
- *   table covers opaque proper names whose internal stress the default heuristic gets wrong
- *   (checked against real espeak-ng output for verification only) — three entries so far (juliana,
- *   beatrix, wilhelmina), added only after confirming each actually needs it. None of this
- *   generalizes beyond what it's specifically been checked against; any address outside these
- *   curated lists remains a plausible source of wrong stress, same caveat as above, just narrower
- *   in scope now.
+ *   table covers opaque proper names whose internal stress the default heuristic gets wrong —
+ *   three entries so far (juliana, beatrix, wilhelmina), added only after confirming each
+ *   actually needs it. Cross-checked against real Wiktionary IPA where available, which caught a
+ *   real mistake: the "beatrix" entry was first verified against espeak-ng's own output alone,
+ *   which turned out to itself be wrong for this specific name (see that entry's own comment) —
+ *   espeak-ng is a rule-based G2P system too, not a ground-truth pronunciation dictionary, and
+ *   apparently gets proper names wrong sometimes just like this project's own model does. None of
+ *   this generalizes beyond what it's specifically been checked against; any address outside
+ *   these curated lists remains a plausible source of wrong stress, same caveat as above, just
+ *   narrower in scope now.
  *
  * None of this has been tried on-device, only through a desktop `onnxruntime` harness against
  * the real `nl_NL-pim-medium` Piper voice (CC0) — same caveat [G2P]'s own English pipeline had
@@ -215,17 +219,28 @@ class DutchG2P(
         /**
          * Hand-verified overrides for opaque proper names whose internal stress
          * [DutchCompoundSegmenter]'s default per-constituent heuristic (first non-schwa vowel)
-         * gets wrong. Checked individually against real espeak-ng output (verification only,
-         * never training data) — each entry here was confirmed to actually need one; several
-         * other candidate names (Maxima, Willem, Alexander, Emma) were checked and found to
-         * already stress correctly under the default heuristic, so they're deliberately absent.
-         * Reusable across every compound using that name (e.g. "julianalaan", "julianaplein",
-         * "julianastraat" all reuse this "juliana" entry) — a real generalization over patching
-         * each compound individually the way [KNOWN_WORDS] does.
+         * gets wrong. Checked individually — each entry here was confirmed to actually need one;
+         * several other candidate names (Maxima, Willem, Alexander, Emma) were checked and found
+         * to already stress correctly under the default heuristic, so they're deliberately
+         * absent. Reusable across every compound using that name (e.g. "julianalaan",
+         * "julianaplein", "julianastraat" all reuse this "juliana" entry) — a real generalization
+         * over patching each compound individually the way [KNOWN_WORDS] does.
+         *
+         * Cross-checked against real Wiktionary IPA (not just espeak-ng — see the "beatrix" entry
+         * below for why that mattered) where an entry exists: "juliana" (`/ˌjy.liˈaː.naː/`) and
+         * "wilhelmina" (`/ˌʋɪl.ɦɛlˈmi.naː/`, its "ɦ" canonicalized to "h" like everywhere else in
+         * this pipeline — see `prepare_corpus.py`) both matched exactly.
          */
         internal val NAME_STRESS_OVERRIDES: Map<String, List<Pair<String, Int>>> = mapOf(
             "juliana" to listOf("j" to 0, "y" to 2, "l" to 0, "i" to 0, "aː" to 1, "n" to 0, "aː" to 0),
-            "beatrix" to listOf("b" to 0, "ə" to 0, "ɑ" to 1, "t" to 0, "r" to 0, "ɪ" to 0, "k" to 0, "s" to 0),
+            // Originally verified against espeak-ng's output alone (bəˈɑtrɪks — schwa-reduced
+            // first syllable, stress on the second). Real Wiktionary IPA disagrees on both counts:
+            // /ˈbeː.aː.trɪks/ — full, unreduced vowels in both of the first two syllables (a
+            // formal/Latinate name resisting the ordinary schwa-reduction a rule-based G2P
+            // system like espeak-ng would default to), with primary stress on the FIRST syllable,
+            // not the second. espeak-ng's own Dutch letter-to-sound rules got this specific name
+            // wrong; this override now follows Wiktionary instead.
+            "beatrix" to listOf("b" to 0, "eː" to 1, "aː" to 0, "t" to 0, "r" to 0, "ɪ" to 0, "k" to 0, "s" to 0),
             "wilhelmina" to listOf(
                 "ʋ" to 0, "ɪ" to 2, "l" to 0, "h" to 0, "ɛ" to 0, "l" to 0, "m" to 0, "i" to 1, "n" to 0, "aː" to 0,
             ),

@@ -83,6 +83,17 @@ class DutchG2PTest {
     }
 
     @Test
+    fun `beatrix stresses its first syllable with full, unreduced vowels`() {
+        // Regression test for a real bug: this override was originally verified against
+        // espeak-ng's own output alone (bəˈɑtrɪks -- schwa-reduced first syllable, stress on the
+        // second), which turned out to itself be wrong. Real Wiktionary IPA is
+        // /ˈbeː.aː.trɪks/ -- stress on the FIRST syllable, with two full vowels, not one reduced
+        // to schwa. espeak-ng's rule-based Dutch G2P mishandled this specific (Latinate) name.
+        assertEquals("bˈeːaːtrɪks", g2p.toEspeakIpa("beatrix"))
+        assertEquals("bˈeːaːtrɪksplɛɪn", g2p.toEspeakIpa("beatrixplein"))
+    }
+
+    @Test
     fun `a compound whose suffix could itself be mistaken for a dictionary word still splits`() {
         // "amstelveen" = amstel + veen: exercises the FINAL_STRESS_PLACE_SUFFIXES pre-pass, since
         // "amstelveen" is itself individually listed in the bundled wordlist (it's a real town),
