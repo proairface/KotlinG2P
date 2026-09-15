@@ -9,19 +9,20 @@ have to re-derive decisions or re-attempt things already tried and rejected by e
 ## Current state (as of this writing)
 
 - [KotlinG2P PR #1](https://github.com/proairface/KotlinG2P/pull/1) — **merged** to `main`.
-- **Not tagged/released.** The latest git tag is still `v0.5.0`, cut before this Dutch work
-  started. JitPack (what Detour and anyone else consuming this library via Gradle actually
-  builds from) only serves tags, not arbitrary commits on `main` by default — so this work is
-  invisible to any downstream consumer until a new tag is cut. **If picking this up again: decide
-  whether it's ready to release (v0.6.0?) before spending more research time**, or a growing pile
-  of unreleased work just sits there.
+- **`build.gradle.kts` bumped to `0.6.0`, but the `v0.6.0` git tag itself is deliberately not
+  cut yet** — a follow-up session prepared this specifically so Detour could consume `DutchG2P`
+  via JitPack, but a public tag/release is a one-way, downstream-visible action, so it's gated on
+  an explicit go-ahead rather than done automatically. If you're picking this up and the tag
+  still doesn't exist, that go-ahead is the next step, not more code.
 - The feature branch (`dutch-g2p-experimental`) is merged and now stale — safe to delete, never
   done because the decision was left pending mid-session (see "Loose ends" below).
 - Consuming project: [Detour](https://github.com/proairface/detour), a Dutch delivery-routing
-  Android app. Its own `docs/PROJECT-STATE.md` and `CLAUDE.md` were updated (separate session, a
-  docs-only PR) to record that this exists upstream but **is not wired into the app at all** —
-  no version bump, no Dutch Piper voice chosen, no code changes on Detour's side. See that repo's
-  `docs/PROJECT-STATE.md` §8 for the ordered next-steps list to actually integrate it.
+  Android app. A follow-up session wired the actual integration — `DutchG2P` plus the
+  already-mirrored `nl_NL-mls-medium` Piper voice — pending only the tag above and the owner
+  picking a speaker (see that repo's `docs/PROJECT-STATE.md` for the wiring detail, including a
+  real finding this handover doc didn't anticipate: that voice is a 52-speaker MLS model needing
+  a `sid` tensor `PiperVoiceSynthesizer` didn't support, not a single-speaker drop-in like
+  `en_US-ryan-high`).
 
 ## What's built and considered solid
 
