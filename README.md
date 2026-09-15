@@ -1,8 +1,11 @@
 # KotlinG2P
 
-Espeak-free English grapheme-to-phoneme (G2P) library for Kotlin/JVM — CMUdict lookup plus a
-letter-to-sound model trained on that dictionary, for on-device TTS. No espeak-ng, no GPL,
-anywhere in the dependency tree, and no dependencies at all at runtime.
+Espeak-free grapheme-to-phoneme (G2P) library for Kotlin/JVM, for on-device TTS. No espeak-ng,
+no GPL, anywhere in the dependency tree, and no dependencies at all at runtime.
+
+English (`G2P`) is the mature path: CMUdict lookup plus a letter-to-sound model trained on that
+dictionary. Dutch (`DutchG2P`) is new and **experimental** — see its own section below and its
+class doc comment before relying on it.
 
 ## Why this exists
 
@@ -241,8 +244,9 @@ library currently does without.
   consonant — and the ceiling here is capped by the letter forest's own phoneme mistakes as much
   as by the stress forest itself: an isolated test against *true* phonemes (see "Stress" above)
   scored 87.8% per vowel, well above what the full pipeline achieves per word.
-- **English only.** The trainer is language-agnostic — it learns from whatever pronunciation
-  dictionary it is given — but the only dictionary bundled here is CMUdict.
+- **English is the mature path.** The trainer is language-agnostic — it learns from whatever
+  pronunciation dictionary it is given, and a Dutch model now exists too — but see "Dutch
+  (experimental)" below for how much less mature that path is.
 - **No homograph disambiguation.** CMUdict lists multiple pronunciations for words like
   "read" (present vs. past tense); this library always takes the first listed pronunciation.
 - **House-number reading is literal, not colloquial.** "2340" is spelled "two thousand three
@@ -253,10 +257,95 @@ library currently does without.
   conventions (e.g. Kokoro/misaki's). Pairing this with a specific neural voice may need
   extra alignment work.
 
+## Dutch (experimental)
+
+```kotlin
+val g2p = DutchG2P()
+println(g2p.toEspeakIpa("je bent aangekomen."))
+// jə bˈɛnt ˈaːnɣəkˌoːmən.
+```
+
+Built the same way English was — a letter-to-sound model trained on a real dictionary, zero
+espeak-ng in the training data or runtime path — but far less mature, and shipped here anyway
+because an honest, working, imperfect start is more useful than nothing while the real fix gets
+built. **Read [`DutchG2P`'s class doc comment](src/main/kotlin/io/github/proairface/kotling2p/DutchG2P.kt)
+in full before using it.**
+
+The short version:
+
+- **What's solid** (checked by ear, iteratively, against a real and growing test set): common
+  words, the well-known "-en" verb-ending alternation, a handful of homograph-like function
+  words ("een" the article vs. the number, etc.), sentence-level prosody (function words
+  destressed, sentence-ending punctuation preserved as a pause cue — without both, even a
+  correctly-phonemized sentence sounds like a flat, word-by-word list), and the diphthong
+  symbol-encoding fix (WikiPron's own IPA notation used a different Unicode encoding than what
+  the target espeak-trained voices actually expect, which was silently corrupting several
+  diphthongs).
+- **Compound primary stress on street/place names is now handled**, for the case that matters
+  most for an address-reading app. `DutchCompoundSegmenter` finds a word's real-word boundary
+  (dictionary-backed, against a bundled OpenTaal wordlist — dual Revised-BSD/CC-BY-3.0) and gives
+  ONE constituent its own stress, matching Dutch's default compound-stress rule (Booij: "main
+  stress is in most cases on the first constituent"). A small, hand-verified
+  `DutchG2P.NAME_STRESS_OVERRIDES` table (currently: juliana, beatrix, wilhelmina) covers opaque
+  proper names whose internal stress the default per-syllable heuristic gets wrong — and, because
+  it keys on the name itself, it generalizes across every street/place using that name
+  ("Julianastraat", "Julianaplein", "Julianalaan" all correctly stress "juliana" the same way,
+  where the whole-word `KNOWN_WORDS` approach this replaced needed a separate hand-checked entry
+  per compound).
+- **One documented exception to "first constituent": -dam/-meer/-veen/-waard place names.**
+  ANS (the standard reference grammar of Dutch), §1.6.5.1 "De klemtoon in nominale
+  samenstellingen" (revised by Geert Booij, 2020), states that place names ending in these four
+  suffixes are *always* stressed on the LAST constituent instead — Amsterdám, Rotterdám,
+  Heerenvéén — the opposite of the regular rule, while -dorp/-drecht place names (Bátadorp,
+  Bárendrecht) take the regular first-constituent stress. Cross-checked against real Wiktionary
+  IPA for Amsterdam (`/ˌɑm.stərˈdɑm/`) and Rotterdam (`/ˌrɔ.tərˈdɑm/`), which independently
+  confirm final-syllable stress. `DutchCompoundSegmenter` applies this. (This also fixed a real
+  bug: "veen" used to be in the first-constituent suffix list, so "Amstelveen" was stressed on
+  the front — wrong per this rule.)
+- **What's still genuinely unsolved**: secondary stress. Real Dutch compounds often carry a
+  secondary stress on their non-primary constituent (e.g. Wiktionary marks Amsterdam/Rotterdam
+  with both primary and secondary stress, and "aangekomen" — not a compound at all, a participle —
+  stresses both syllables too), but ANS's own compound examples mark only primary stress, and
+  ordinary compounds on Wiktionary (voetbal, brandweer, hoofdstad) show no secondary mark either —
+  whether that reflects a real phonetic difference from place-name compounds, or just inconsistent
+  transcription convention, isn't resolved. Deliberately NOT implemented here, after an earlier
+  "stress every non-schwa vowel" attempt was tried and rejected by ear for badly over-stressing
+  longer words. Trailing (non-primary) constituents of a segmented compound are left unstressed
+  entirely rather than guessing. And the segmenter/override approach only covers what it's been
+  checked against: an arbitrary compound whose suffix isn't in `DutchCompoundSegmenter`'s curated
+  suffix lists, or a proper name not in `NAME_STRESS_OVERRIDES`, still falls back to the old
+  first-non-schwa-vowel default and can still get stress wrong. For a library whose whole reason
+  to exist is pronouncing arbitrary street names, this remains a real gap, not a footnote — just a
+  narrower one than before.
+- **Never tried on-device.** Verified only through a desktop `onnxruntime` harness against the
+  real `nl_NL-pim-medium` Piper voice (CC0) — the same caveat English's own pipeline had before
+  its on-device verification.
+- **Why not use espeak-ng's real output to fix stress instead?** It would
+  — a variant that did this was built and compared by ear during development, and sounded
+  clearly better on several fronts. It was not adopted. This project's entire premise is
+  avoiding GPLv3 espeak-ng entanglement in a shipped, commercially-distributed app, and training
+  a model on espeak-ng's own output raises a real, unresolved question about whether that
+  entanglement follows into the resulting model — not one this project is positioned to answer
+  on its own, and not worth risking the whole reason KotlinG2P exists over. See
+  `trainer/dutch/README.md` for the fuller account and `trainer/dutch/prepare_corpus.py` for
+  exactly where real espeak-ng output was used, strictly for verification, never as training
+  data. The `NAME_STRESS_OVERRIDES` entries above were derived the same way: checked individually
+  against real espeak-ng output, never trained on it.
+- **Bundling cost**: the OpenTaal wordlist resource (`dutch-wordlist.txt`, filtered down from
+  OpenTaal's raw ~414k entries — see `trainer/dutch/prepare_wordlist.py`) adds roughly 4.8MB
+  uncompressed to the jar, on top of the existing ~618KB Dutch model — comparable in scale to
+  CMUdict's own bundled English resource.
+
+Secondary stress, and the two opaque-name/inconsistent-secondary-stress sub-problems above, are
+the remaining genuine unsolved pieces. If you want to pick either up, or have ideas, please open
+an issue.
+
 ## License
 
 Apache-2.0 (see `LICENSE`). The bundled CMUdict data keeps its own BSD-style license from
-Carnegie Mellon University — see `src/main/resources/cmudict/LICENSE`.
+Carnegie Mellon University — see `src/main/resources/cmudict/LICENSE`. The Dutch model is
+trained on WikiPron's Dutch export, itself mined from Wiktionary — see `trainer/dutch/README.md`
+for that data's own license.
 
 ## Installation
 
