@@ -361,7 +361,7 @@ repositories {
 }
 
 dependencies {
-    implementation("com.github.proairface:KotlinG2P:v0.6.0")
+    implementation("com.github.proairface:KotlinG2P:v0.7.0")
 }
 ```
 
