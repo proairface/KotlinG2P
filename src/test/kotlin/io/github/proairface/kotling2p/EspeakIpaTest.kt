@@ -2,6 +2,7 @@ package io.github.proairface.kotling2p
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 /**
  * Compares G2P.toEspeakIpa against real `espeak-ng -v en-us --ipa` output, captured directly
@@ -19,6 +20,12 @@ import kotlin.test.assertEquals
  *   unstressed vowel), so this actually matches exactly. "murder" is the confirming
  *   counter-example that keeps the rule narrow: its D does *not* flap in real espeak-ng
  *   output ("mˈɜːdɚ", not "mˈɜːɾɚ"), which is why flapping only triggers on T, not D.
+ *
+ * The clause-punctuation and function-word-destressing tests below are checked against the real
+ * `piper_phonemize` Python package instead of the plain `espeak-ng` CLI — the CLI's own `--ipa`
+ * mode turned out to drop punctuation and clause breaks entirely (just a newline), which does
+ * NOT match what Piper's own training data went through; `piper_phonemize.phonemize_espeak`
+ * is the actual code path that does, and is what these expected strings were captured from.
  */
 class EspeakIpaTest {
 
@@ -48,5 +55,29 @@ class EspeakIpaTest {
         // This asserts what we actually produce, so a future change to this specific
         // behavior is a deliberate decision, not a silent regression.
         assertEquals("tˈɛləfˌoʊn", g2p.toEspeakIpa("telephone"))
+    }
+
+    // real piper_phonemize.phonemize_espeak("hello, world", "en-us") -> "həlˈoʊ, wˈɜːld"
+    @Test fun midSentenceCommaIsPreservedAsALiteralPauseToken() =
+        assertMatchesEspeakNg("hello, world", "həlˈoʊ, wˈɜːld")
+
+    // Real piper_phonemize: "You have arrived at your destination." -> "...æt jʊɹ...". Real
+    // espeak-ng destresses "at" in context even though CMUdict's citation form is "AE1 T"
+    // (primary stress) — full-sentence output otherwise has pre-existing CMUdict/LTS-vs-espeak
+    // divergences unrelated to this fix (see this class's other single-word tests), so this
+    // asserts our own actual output, not a full ground-truth match.
+    @Test
+    fun sentenceEndingPeriodIsPreservedAndAtLosesItsCitationStress() {
+        val ipa = g2p.toEspeakIpa("You have arrived at your destination.")
+        assertTrue(ipa.endsWith("."), "expected a preserved sentence-ending period, got: $ipa")
+        assertTrue(" æt " in ipa, "expected 'at' destressed (no ˈ), got: $ipa")
+    }
+
+    // CMUdict alone gives "on" -> "AA1 N" (primary stress); real piper_phonemize destresses it
+    // in context ("the cat sat on the mat" -> "...sˈæt ɔnðə mˈæt", no stress mark on "on").
+    @Test
+    fun onLosesItsCitationStressInContext() {
+        val ipa = g2p.toEspeakIpa("the cat sat on the mat")
+        assertTrue(!ipa.contains("ˈɑːn") && !ipa.contains("ˈɔn"), "expected 'on' destressed, got: $ipa")
     }
 }

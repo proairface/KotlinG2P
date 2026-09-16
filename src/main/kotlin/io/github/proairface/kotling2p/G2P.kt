@@ -20,12 +20,36 @@ class G2P(
     fun toPhonemes(text: String): List<WordPronunciation> =
         TextNormalizer.tokenize(text).map { word -> pronounce(word) }
 
-    /** Espeak-ng-style IPA transcription, ready for a Piper-trained voice model's phoneme
-     * vocabulary — see [EspeakIpa] for exactly what that means and how it was verified. */
-    fun toEspeakIpa(text: String): String = EspeakIpa.transcribe(toPhonemes(text))
+    /**
+     * Espeak-ng-style IPA transcription, ready for a Piper-trained voice model's phoneme
+     * vocabulary — see [EspeakIpa] for exactly what that means and how it was verified.
+     *
+     * Clause-ending punctuation (`,.!?;:`) is preserved as a literal character attached to the
+     * end of its clause, same convention [DutchG2P] already uses for sentence-enders — confirmed
+     * directly against the real `piper_phonemize` Python package (the actual clause-phonemization
+     * path Piper's own training data went through): `phonemize_espeak("...meters, turn right...")`
+     * really does emit a literal `,` token mid-sequence, immediately after the preceding word with
+     * no space before it, matching a Piper voice's own phoneme vocabulary, which has explicit
+     * `,`/`.`/`!`/`?`/`;`/`:` entries alongside its IPA symbols (confirmed directly by inspecting
+     * a real voice's `phoneme_id_map`, not assumed).
+     * [TextNormalizer.tokenize] still strips punctuation from individual word tokens (a trailing
+     * "St." still becomes "STREET" with no stray period) — this split happens on the raw text
+     * first, before tokenization, so the two don't conflict.
+     */
+    fun toEspeakIpa(text: String): String {
+        val clauses = CLAUSE_PUNCTUATION.split(text).map { it.trim() }.filter { it.isNotEmpty() }
+        val marks = CLAUSE_PUNCTUATION.findAll(text).map { it.value }.toList()
+        return clauses.mapIndexed { index, clause ->
+            EspeakIpa.transcribe(toPhonemes(clause)) + (marks.getOrNull(index) ?: "")
+        }.joinToString(" ")
+    }
 
     private fun pronounce(word: String): WordPronunciation {
         dictionary.lookup(word)?.let { return WordPronunciation(word, it, PronunciationSource.DICTIONARY) }
         return WordPronunciation(word, letterToSound.predict(word), PronunciationSource.LETTER_TO_SOUND)
+    }
+
+    private companion object {
+        val CLAUSE_PUNCTUATION = Regex("""([,.!?;:])""")
     }
 }
