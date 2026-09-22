@@ -8,21 +8,46 @@ have to re-derive decisions or re-attempt things already tried and rejected by e
 
 ## Current state (as of this writing)
 
-- [KotlinG2P PR #1](https://github.com/proairface/KotlinG2P/pull/1) — **merged** to `main`.
-- **`build.gradle.kts` bumped to `0.6.0`, but the `v0.6.0` git tag itself is deliberately not
-  cut yet** — a follow-up session prepared this specifically so Detour could consume `DutchG2P`
-  via JitPack, but a public tag/release is a one-way, downstream-visible action, so it's gated on
-  an explicit go-ahead rather than done automatically. If you're picking this up and the tag
-  still doesn't exist, that go-ahead is the next step, not more code.
-- The feature branch (`dutch-g2p-experimental`) is merged and now stale — safe to delete, never
-  done because the decision was left pending mid-session (see "Loose ends" below).
-- Consuming project: [Detour](https://github.com/proairface/detour), a Dutch delivery-routing
-  Android app. A follow-up session wired the actual integration — `DutchG2P` plus the
-  already-mirrored `nl_NL-mls-medium` Piper voice — pending only the tag above and the owner
-  picking a speaker (see that repo's `docs/PROJECT-STATE.md` for the wiring detail, including a
-  real finding this handover doc didn't anticipate: that voice is a 52-speaker MLS model needing
-  a `sid` tensor `PiperVoiceSynthesizer` didn't support, not a single-speaker drop-in like
-  `en_US-ryan-high`).
+⚠️ **Updated well after the original writing — everything below in this section was once
+pending and is now done.** Left the superseded version in place under "Historical note" rather
+than deleting it outright, since the `sid`-tensor finding it describes is real, still-relevant
+history for anyone touching `PiperVoiceSynthesizer`'s multi-speaker path.
+
+- [KotlinG2P PR #1](https://github.com/proairface/KotlinG2P/pull/1) — merged to `main` long ago.
+- **Tagged and released.** `v0.6.0` was cut, and the project has since moved past it —
+  currently pinned at **`v0.7.0`** (see the version-history table and the English
+  punctuation/destress fix further down this file's sibling sections/the README), which Detour
+  consumes via JitPack.
+- **Fully integrated into Detour, confirmed working end to end, including on the owner's own
+  device.** `NeuralVoiceEngine` picks `DutchG2P` from the app's language tag; Dutch TTS was
+  confirmed audible and correct on a real phone (see `docs/PROJECT-STATE.md` in the detour repo
+  for the on-device round that found and fixed a `SocketException` connection-drop bug along the
+  way).
+- **The owner picked a speaker — then both.** `nl_NL-mls-medium` (see "Historical note" below)
+  was tried and rejected by ear ("artificial and robotic" on every one of its 52 speakers) in
+  favor of two clean single-speaker replacements, `nl_NL-pim-medium` and `nl_NL-alex-medium` —
+  both shipped, with a voice picker in Detour's app settings rather than a single fixed choice,
+  since the owner liked both. `pim` is also the exact voice this project's own by-ear
+  verification during `DutchG2P` development was tuned against.
+- The feature branch (`dutch-g2p-experimental`) and this doc's own original feature branch
+  (`docs/dutch-g2p-handover`) are both merged and stale — still not deleted as of this update
+  (see "Loose ends" below; a session can't delete a remote branch itself, this needs the repo
+  owner).
+
+### Historical note (superseded — kept for the `sid`-tensor finding, not as current state)
+
+> `build.gradle.kts` bumped to `0.6.0`, but the `v0.6.0` git tag itself is deliberately not cut
+> yet — a follow-up session prepared this specifically so Detour could consume `DutchG2P` via
+> JitPack, but a public tag/release is a one-way, downstream-visible action, so it's gated on an
+> explicit go-ahead rather than done automatically.
+>
+> Consuming project: [Detour](https://github.com/proairface/detour), a Dutch delivery-routing
+> Android app. A follow-up session wired the actual integration — `DutchG2P` plus the
+> already-mirrored `nl_NL-mls-medium` Piper voice — pending only the tag above and the owner
+> picking a speaker (see that repo's `docs/PROJECT-STATE.md` for the wiring detail, including a
+> real finding this handover doc didn't anticipate: that voice is a 52-speaker MLS model needing
+> a `sid` tensor `PiperVoiceSynthesizer` didn't support, not a single-speaker drop-in like
+> `en_US-ryan-high`).
 
 ## What's built and considered solid
 
@@ -155,9 +180,9 @@ style bot wall and blocked both ways — didn't attempt to circumvent it further
   the straightforward if tedious way to extend coverage.
 - **Compounds whose suffix isn't in `DutchCompoundSegmenter`'s curated suffix lists** fall back
   to the old first-non-schwa-vowel default and can still get stress wrong.
-- **Never tested on-device (Android).** Verified only through a desktop `onnxruntime` harness —
-  same caveat English's own pipeline had before its on-device verification.
-- **Not yet integrated into Detour at all** — see "Current state" above.
+- ~~Never tested on-device (Android).~~ **Resolved** — confirmed working on the owner's own
+  phone since this was written; see "Current state" above.
+- ~~Not yet integrated into Detour at all.~~ **Resolved** — see "Current state" above.
 
 ## Loose ends from this session (housekeeping, not research)
 
@@ -165,6 +190,12 @@ style bot wall and blocked both ways — didn't attempt to circumvent it further
   deleting the (already-merged, undeletable-as-such) *pull requests* instead, and the
   conversation moved to this handover doc before the branch-deletion question was resolved.
   Safe to delete (locally and on `origin`) whenever convenient; it serves no further purpose.
+  ⚠️ **Update from a later housekeeping pass: still not deleted, and `docs/dutch-g2p-handover`
+  (the branch this very file was originally written on) is in the exact same state** — merged,
+  stale, safe to delete, still sitting there. A cloud session's credentials only allow pushing to
+  its own designated branch, not deleting others (confirmed against this exact limitation in the
+  sibling `detour` repo — `git push origin --delete` there returns HTTP 403), so both need the
+  repo owner's own action via GitHub's UI whenever it's convenient.
 - A recurring `stop-hook-git-check.sh` false positive nagged repeatedly through the session,
   claiming unpushed commits when local and remote were already identical — root cause never
   fully diagnosed, but consistently resolved by `git push -u origin <branch>` re-establishing the
