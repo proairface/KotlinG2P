@@ -1,6 +1,5 @@
 package io.github.proairface.kotling2p
 
-import java.io.InputStream
 
 /**
  * EXPERIMENTAL. Espeak-free Dutch grapheme-to-phoneme, built the same way [G2P] was for
@@ -158,9 +157,7 @@ class DutchG2P(
         private const val WORDLIST_RESOURCE_PATH = "lts/dutch-wordlist.txt"
 
         private fun loadBundledModel(): LtsModel {
-            val stream: InputStream = DutchG2P::class.java.classLoader.getResourceAsStream(MODEL_RESOURCE_PATH)
-                ?: error("$MODEL_RESOURCE_PATH not found on the classpath")
-            return stream.use { LtsModel.read(it) }
+            return LtsModel.read(BundledResources.bytes(MODEL_RESOURCE_PATH))
         }
 
         /** Plain newline-separated text, not a serialized set — see [loadBundledPhonemeMap]'s
@@ -169,23 +166,19 @@ class DutchG2P(
          * (OpenTaal, dual Revised-BSD/CC-BY-3.0) and `trainer/dutch/prepare_wordlist.py` for how
          * it was filtered down from OpenTaal's raw ~414k-entry list. */
         private fun loadBundledWordlist(): Set<String> {
-            val stream = DutchG2P::class.java.classLoader.getResourceAsStream(WORDLIST_RESOURCE_PATH)
-                ?: error("$WORDLIST_RESOURCE_PATH not found on the classpath")
-            return stream.bufferedReader().useLines { lines -> lines.filter { it.isNotBlank() }.toHashSet() }
+            return BundledResources.bytes(WORDLIST_RESOURCE_PATH).decodeToString()
+                .lineSequence().filter { it.isNotBlank() }.toHashSet()
         }
 
         /** Plain "token\tipa" lines, not JSON — this library has no runtime dependencies and a
          * flat map needs no real parser to earn one. Tokens are short ASCII placeholders (not
          * single characters) interned during training — see `trainer/dutch/prepare_corpus.py`. */
         private fun loadBundledPhonemeMap(): Map<String, String> {
-            val stream = DutchG2P::class.java.classLoader.getResourceAsStream(PHONEME_MAP_RESOURCE_PATH)
-                ?: error("$PHONEME_MAP_RESOURCE_PATH not found on the classpath")
-            return stream.bufferedReader().useLines { lines ->
-                lines.filter { it.isNotBlank() }.associate { line ->
+            return BundledResources.bytes(PHONEME_MAP_RESOURCE_PATH).decodeToString()
+                .lineSequence().filter { it.isNotBlank() }.associate { line ->
                     val (token, ipa) = line.split('\t', limit = 2)
                     token to ipa
                 }
-            }
         }
 
         /**

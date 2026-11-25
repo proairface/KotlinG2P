@@ -1,6 +1,5 @@
 package io.github.proairface.kotling2p
 
-import java.io.BufferedReader
 
 /**
  * Loads the bundled CMU Pronouncing Dictionary (BSD-style licensed, Carnegie Mellon
@@ -21,20 +20,20 @@ class CmuDict private constructor(
         private const val RESOURCE_PATH = "cmudict/cmudict.dict"
         private val commentPrefix = ";;;"
 
-        fun loadBundled(): CmuDict {
-            val stream = CmuDict::class.java.classLoader.getResourceAsStream(RESOURCE_PATH)
-                ?: error("$RESOURCE_PATH not found on the classpath")
-            return stream.bufferedReader(Charsets.ISO_8859_1).use { load(it) }
-        }
+        fun loadBundled(): CmuDict = load(latin1(BundledResources.bytes(RESOURCE_PATH)))
 
-        internal fun load(reader: BufferedReader): CmuDict {
+        /** The file is ISO-8859-1, which maps each byte straight to the same code point. */
+        private fun latin1(bytes: ByteArray): String =
+            CharArray(bytes.size) { (bytes[it].toInt() and 0xFF).toChar() }.concatToString()
+
+        internal fun load(text: String): CmuDict {
             val entries = LinkedHashMap<String, List<Phoneme>>()
-            reader.forEachLine { rawLine ->
-                if (rawLine.startsWith(commentPrefix) || rawLine.isBlank()) return@forEachLine
+            for (rawLine in text.lineSequence()) {
+                if (rawLine.startsWith(commentPrefix) || rawLine.isBlank()) continue
                 val parts = rawLine.trim().split(Regex("\\s+"), limit = 2)
-                if (parts.size != 2) return@forEachLine
+                if (parts.size != 2) continue
                 val word = parts[0].substringBefore('(').uppercase()
-                if (entries.containsKey(word)) return@forEachLine
+                if (entries.containsKey(word)) continue
                 entries[word] = parts[1].split(" ").map { Phoneme(it) }
             }
             return CmuDict(entries)
