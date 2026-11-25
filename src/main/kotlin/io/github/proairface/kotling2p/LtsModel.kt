@@ -1,6 +1,6 @@
 package io.github.proairface.kotling2p
 
-import java.io.InputStream
+import kotlin.math.ln
 
 /**
  * Where each of a tree's features comes from, shared by the trainer and the decoder so the two
@@ -191,7 +191,7 @@ class LtsModel private constructor(
         }
 
         var beam = listOf(Hypothesis(0.0, IntArray(0), IntArray(layout.phonemeHistory) { phonemeBoundary }))
-        val votes = HashMap<Int, Int>()
+        val votes = VoteTally()
         for (position in ids.indices) {
             val letter = ids[position]
             if (letter < 0) continue
@@ -205,11 +205,11 @@ class LtsModel private constructor(
                 for (tree in first until first + ensembleSize) {
                     if (roots[tree] == NO_TREE) continue
                     val label = classify(roots[tree], ids, position, hypothesis.history)
-                    votes[label] = (votes[label] ?: 0) + 1
+                    votes.add(label)
                     cast++
                 }
-                for ((label, count) in votes) {
-                    val cost = -Math.log(count.toDouble() / cast)
+                votes.forEachInOrder { label, count ->
+                    val cost = VoteCosts.cost(count, cast)
                     extended += hypothesis.extend(label, cost, labelHistoryIds[label])
                 }
             }
@@ -331,14 +331,12 @@ class LtsModel private constructor(
         private const val NO_TREE = -1
 
         fun loadBundled(): LtsModel {
-            val stream = LtsModel::class.java.classLoader.getResourceAsStream(RESOURCE_PATH)
-                ?: error("$RESOURCE_PATH not found on the classpath")
-            return stream.use { read(it) }
+            return read(BundledResources.bytes(RESOURCE_PATH))
         }
 
-        fun read(stream: InputStream): LtsModel {
-            val bytes = stream.readBytes()
-            require(bytes.size > 4 && String(bytes, 0, 4, Charsets.US_ASCII) == "KG2P") {
+        /** A model from its serialized bytes. A stream overload for the JVM is in JvmStreams.kt. */
+        fun read(bytes: ByteArray): LtsModel {
+            require(bytes.size > 4 && bytes.decodeToString(0, 4) == "KG2P") {
                 "not a KotlinG2P letter-to-sound model"
             }
             val cursor = Cursor(bytes)
@@ -422,9 +420,147 @@ class LtsModel private constructor(
 
         fun ascii(): String {
             val length = varint()
-            val text = String(bytes, position, length, Charsets.US_ASCII)
+            // ASCII by construction (the trainer writes only ASCII here), so UTF-8 decoding
+            // reads it identically and also compiles for JavaScript.
+            val text = bytes.decodeToString(position, position + length)
             position += length
             return text
         }
+    }
+}
+
+/**
+ * Per-letter vote counts, visited in **exactly the order `java.util.HashMap<Int, Int>` visits
+ * them**, on every platform.
+ *
+ * Why that matters: two candidate phonemes with the same number of votes get the same cost, the
+ * beam sort is stable, so whichever is visited first wins the tie. This used to be a plain
+ * `HashMap`, whose visiting order is an implementation detail: the JavaScript build (Detour's web
+ * version) visited ties in a different order and pronounced 6 of 6010 test inputs differently from
+ * the JVM. Reproducing the JDK's order, rather than picking a new one, keeps the JVM output
+ * byte-identical to every earlier release.
+ *
+ * The JDK order for small non-negative Int keys: buckets in ascending `key and (capacity - 1)`
+ * (an Int's hash is itself, and the high-bit spreading is a no-op below 65536), insertion order
+ * within a bucket (resizing splits buckets without reordering them). Capacity starts at 16 and
+ * doubles whenever the entry count passes 3/4 of it; `clear()` keeps the grown table, so it is
+ * tracked for the whole word, like the map it replaces, which [predict] created once per word.
+ */
+internal class VoteTally {
+    private val labels = ArrayList<Int>()
+    private val counts = ArrayList<Int>()
+    private var capacity = 16
+
+    fun clear() {
+        labels.clear()
+        counts.clear()
+    }
+
+    fun add(label: Int) {
+        require(label in 0..0xFFFF) { "label $label outside the range the JDK-order emulation covers" }
+        val index = labels.indexOf(label)
+        if (index >= 0) {
+            counts[index] = counts[index] + 1
+            return
+        }
+        labels += label
+        counts += 1
+        if (labels.size > capacity * 3 / 4) capacity *= 2
+    }
+
+    inline fun forEachInOrder(action: (label: Int, count: Int) -> Unit) {
+        val mask = capacity - 1
+        // sortedBy is stable, so insertion order survives within a bucket.
+        for (i in labels.indices.sortedBy { labels[it] and mask }) action(labels[i], counts[i])
+    }
+}
+
+/**
+ * `-ln(count / cast)` for every vote split an ensemble of up to [MAX_TABLE_CAST] trees can
+ * produce, as exact bit patterns.
+ *
+ * `ln` is not bit-identical across platforms: for 31 of these 528 values the JavaScript engine's
+ * logarithm differs from the desktop JVM's in the last bit, and Android's runtime has its own
+ * again. Costs built from those values then break ties differently in the beam, and a word comes
+ * out pronounced differently (2 of 40,000 test words did, in the JavaScript build). These are the
+ * values the desktop JVM's `Math.log` gives, the ones every model in this repo was trained and
+ * measured with, so the JVM output stays byte-identical to earlier releases and every other
+ * platform now matches it exactly. Generated by computing `-Math.log(c.toDouble() / n)` on
+ * HotSpot for 1 <= c <= n <= 32 and writing `doubleToRawLongBits`.
+ */
+internal object VoteCosts {
+    const val MAX_TABLE_CAST = 32
+
+    private val bits = longArrayOf(
+        // cast = 1
+        0x8000000000000000UL.toLong(),
+        // cast = 2
+        0x3fe62e42fefa39efL, 0x8000000000000000UL.toLong(),
+        // cast = 3
+        0x3ff193ea7aad030bL, 0x3fd9f323ecbf984dL, 0x8000000000000000UL.toLong(),
+        // cast = 4
+        0x3ff62e42fefa39efL, 0x3fe62e42fefa39efL, 0x3fd269621134db92L, 0x8000000000000000UL.toLong(),
+        // cast = 5
+        0x3ff9c041f7ed8d33L, 0x3fed5240f0e0e077L, 0x3fe058aefa811452L, 0x3fcc8ff7c79a9a20L, 0x8000000000000000UL.toLong(),
+        // cast = 6
+        0x3ffcab0bfa2a2002L, 0x3ff193ea7aad030bL, 0x3fe62e42fefa39efL, 0x3fd9f323ecbf984dL, 0x3fc7565011e49675L, 0x8000000000000000UL.toLong(),
+        // cast = 7
+        0x3fff2272ae325a58L, 0x3ff40b512eb53d60L, 0x3feb1d10670aae9aL, 0x3fe1e85f5e7040d1L, 0x3fd588c2d913348fL, 0x3fc3bb35a041d2abL, 0x8000000000000000UL.toLong(),
+        // cast = 8
+        0x4000a2b23f3bab73L, 0x3ff62e42fefa39efL, 0x3fef62f40794a7b8L, 0x3fe62e42fefa39efL, 0x3fde148a1a2726ceL, 0x3fd269621134db92L, 0x3fc1178e8227e47cL, 0x8000000000000000UL.toLong(),
+        // cast = 9
+        0x400193ea7aad030bL, 0x3ff810b375dce91eL, 0x3ff193ea7aad030bL, 0x3fe9f323ecbf984cL, 0x3fe2cf25fad8f1c3L, 0x3fd9f323ecbf984dL, 0x3fd015891c9eaef7L, 0x3fbe27076e2af2eaL, 0x8000000000000000UL.toLong(),
+        // cast = 10
+        0x40026bb1bbb55515L, 0x3ff9c041f7ed8d33L, 0x3ff34378fcbda721L, 0x3fed5240f0e0e077L, 0x3fe62e42fefa39efL, 0x3fe058aefa811452L, 0x3fd6d3c324e13f50L, 0x3fcc8ff7c79a9a20L, 0x3fbaf8e8210a415cL, 0x8000000000000000UL.toLong(),
+        // cast = 11
+        0x40032ee3b77f374cL, 0x3ffb46a5ef8151a0L, 0x3ff4c9dcf4516b8dL, 0x3ff02f84700434a8L, 0x3fe93b0aee21c2c8L, 0x3fe36576e9a89d2bL, 0x3fdced5303305101L, 0x3fd4618bc21c5ec2L, 0x3fc9af93cd234410L, 0x3fb8663f793c46c9L, 0x8000000000000000UL.toLong(),
+        // cast = 12
+        0x4003e116bcd39e7dL, 0x3ffcab0bfa2a2002L, 0x3ff62e42fefa39efL, 0x3ff193ea7aad030bL, 0x3fec03d703735f8cL, 0x3fe62e42fefa39efL, 0x3fe13f7596e9c544L, 0x3fd9f323ecbf984dL, 0x3fd269621134db92L, 0x3fc7565011e49675L, 0x3fb64660aa8ce629L, 0x8000000000000000UL.toLong(),
+        // cast = 13
+        0x400485042b318c51L, 0x3ffdf2e6d6e5fbaaL, 0x3ff7761ddbb61597L, 0x3ff2dbc55768deb3L, 0x3fee938cbceb16ddL, 0x3fe8bdf8b871f13fL, 0x3fe3cf2b50617c96L, 0x3fdf128f5faf06ecL, 0x3fd788cd84244a34L, 0x3fd0ca937be1b9dbL, 0x3fc562073b255055L, 0x3fb47dadcbbdba7fL, 0x8000000000000000UL.toLong(),
+        // cast = 14
+        0x40051cca16d7bba8L, 0x3fff2272ae325a58L, 0x3ff8a5a9b3027445L, 0x3ff40b512eb53d60L, 0x3ff0795235c1ea1bL, 0x3feb1d10670aae9aL, 0x3fe62e42fefa39efL, 0x3fe1e85f5e7040d1L, 0x3fdc46fce155c4e6L, 0x3fd588c2d913348fL, 0x3fcede65f58845bdL, 0x3fc3bb35a041d2abL, 0x3fb2f8bd74c5eacdL, 0x8000000000000000UL.toLong(),
+        // cast = 15
+        0x4005aa16394d481fL, 0x40001e85798eb9a3L, 0x3ff9c041f7ed8d33L, 0x3ff525e973a0564fL, 0x3ff193ea7aad030bL, 0x3fed5240f0e0e077L, 0x3fe8637388d06bcdL, 0x3fe41d8fe84672afL, 0x3fe058aefa811452L, 0x3fd9f323ecbf984dL, 0x3fd3d9940e70869cL, 0x3fcc8ff7c79a9a20L, 0x3fc25120e1bbbcdfL, 0x3fb1a9844eb18ef0L, 0x8000000000000000UL.toLong(),
+        // cast = 16
+        0x40062e42fefa39efL, 0x4000a2b23f3bab73L, 0x3ffac89b834770d4L, 0x3ff62e42fefa39efL, 0x3ff29c440606e6abL, 0x3fef62f40794a7b8L, 0x3fea74269f84330eL, 0x3fe62e42fefa39efL, 0x3fe269621134db92L, 0x3fde148a1a2726ceL, 0x3fd7fafa3bd8151cL, 0x3fd269621134db92L, 0x3fca93ed3c8ad9e3L, 0x3fc1178e8227e47cL, 0x3fb08598b59e3a07L, 0x8000000000000000UL.toLong(),
+        // cast = 17
+        0x4006aa6bc1fa7f7aL, 0x40011edb023bf0feL, 0x3ffbc0ed0947fbe9L, 0x3ff7269484fac504L, 0x3ff394958c0771c0L, 0x3ff0a9cb89cadef1L, 0x3fec64c9ab854939L, 0x3fe81ee60afb501aL, 0x3fe45a051d35f1bdL, 0x3fe0fae81914a991L, 0x3fdbdc4053da4170L, 0x3fd64aa8293707e6L, 0x3fd12b3cb6479948L, 0x3fc8da1ab22c3d27L, 0x3fc005588ad375aeL, 0x3faf0a30c01162a8L, 0x8000000000000000UL.toLong(),
+        // cast = 18
+        0x40071f7b3a6b9187L, 0x400193ea7aad030bL, 0x3ffcab0bfa2a2002L, 0x3ff810b375dce91eL, 0x3ff47eb47ce995d9L, 0x3ff193ea7aad030bL, 0x3fee39078d49916bL, 0x3fe9f323ecbf984cL, 0x3fe62e42fefa39efL, 0x3fe2cf25fad8f1c3L, 0x3fdf84bc1762d1d4L, 0x3fd9f323ecbf984dL, 0x3fd4d3b879d029acL, 0x3fd015891c9eaef7L, 0x3fc7565011e49675L, 0x3fbe27076e2af2eaL, 0x3fad43de1c448329L, 0x8000000000000000UL.toLong(),
+        // cast = 19
+        0x40078e360604b32dL, 0x400202a5464624b1L, 0x3ffd8881915c634fL, 0x3ff8ee290d0f2c6aL, 0x3ff55c2a141bd926L, 0x3ff2716011df4657L, 0x3feff3f2bbae1804L, 0x3febae0f1b241ee5L, 0x3fe7e92e2d5ec088L, 0x3fe48a11293d785cL, 0x3fe17d493a15ef83L, 0x3fdd68fa4988a57dL, 0x3fd8498ed69936dbL, 0x3fd38b5f7967bc29L, 0x3fce41fccb76b0d7L, 0x3fc5ff3070a793d6L, 0x3fbc794881467654L, 0x3fabaeb2e648698bL, 0x8000000000000000UL.toLong(),
+        // cast = 20
+        0x4007f7427b73e391L, 0x40026bb1bbb55515L, 0x3ffe5a9a7c3ac418L, 0x3ff9c041f7ed8d33L, 0x3ff62e42fefa39efL, 0x3ff34378fcbda721L, 0x3ff0cc1248b56cccL, 0x3fed5240f0e0e077L, 0x3fe98d60031b821bL, 0x3fe62e42fefa39efL, 0x3fe3217b0fd2b116L, 0x3fe058aefa811452L, 0x3fdb91f28212ba02L, 0x3fd6d3c324e13f50L, 0x3fd269621134db92L, 0x3fcc8ff7c79a9a20L, 0x3fc4cd6b97964179L, 0x3fbaf8e8210a415cL, 0x3faa431d5bcc193eL, 0x8000000000000000UL.toLong(),
+        // cast = 21
+        0x40085b2e946faeb1L, 0x4002cf9dd4b12035L, 0x3fff2272ae325a58L, 0x3ffa881a29e52373L, 0x3ff6f61b30f1d02fL, 0x3ff40b512eb53d60L, 0x3ff193ea7aad030bL, 0x3feee1f154d00cf7L, 0x3feb1d10670aae9aL, 0x3fe7bdf362e9666eL, 0x3fe4b12b73c1dd95L, 0x3fe1e85f5e7040d1L, 0x3fdeb15349f112ffL, 0x3fd9f323ecbf984dL, 0x3fd588c2d913348fL, 0x3fd1675cababa60fL, 0x3fcb0c2d2752f372L, 0x3fc3bb35a041d2abL, 0x3fb99f11cd5f7090L, 0x3fa8fb063ef2c7f1L, 0x8000000000000000UL.toLong(),
+        // cast = 22
+        0x4008ba74773dc5c7L, 0x40032ee3b77f374cL, 0x3fffe0fe73ce8885L, 0x3ffb46a5ef8151a0L, 0x3ff7b4a6f68dfe5cL, 0x3ff4c9dcf4516b8dL, 0x3ff2527640493138L, 0x3ff02f84700434a8L, 0x3fec9a27f2430af3L, 0x3fe93b0aee21c2c8L, 0x3fe62e42fefa39efL, 0x3fe36576e9a89d2bL, 0x3fe0d5c13030e5daL, 0x3fdced5303305101L, 0x3fd882f1ef83ed45L, 0x3fd4618bc21c5ec2L, 0x3fd08045aa1a326eL, 0x3fc9af93cd234410L, 0x3fc2c3e7139129b1L, 0x3fb8663f793c46c9L, 0x3fa7d178b385c59eL, 0x8000000000000000UL.toLong(),
+        // cast = 23
+        0x4009157dfdd1b3f0L, 0x400389ed3e132574L, 0x40004b88c07b326bL, 0x3ffbfcb8fca92df1L, 0x3ff86aba03b5daadL, 0x3ff57ff0017947deL, 0x3ff308894d710d88L, 0x3ff0e5977d2c10f9L, 0x3fee064e0c92c395L, 0x3feaa73108717b6aL, 0x3fe79a691949f291L, 0x3fe4d19d03f855cdL, 0x3fe241e74a809e7dL, 0x3fdfc59f37cfc243L, 0x3fdb5b3e24235e88L, 0x3fd739d7f6bbd007L, 0x3fd35891deb9a3b3L, 0x3fcf602c36622699L, 0x3fc8747f7cd00c39L, 0x3fc1e3b825dd05edL, 0x3fb749ed2c40a7e7L, 0x3fa6c261a4fb8a1dL, 0x8000000000000000UL.toLong(),
+        // cast = 24
+        0x40096ca77c922cf9L, 0x4003e116bcd39e7dL, 0x4000a2b23f3bab73L, 0x3ffcab0bfa2a2002L, 0x3ff9190d0136ccbeL, 0x3ff62e42fefa39efL, 0x3ff3b6dc4af1ff9aL, 0x3ff193ea7aad030bL, 0x3fef62f40794a7b8L, 0x3fec03d703735f8cL, 0x3fe8f70f144bd6b4L, 0x3fe62e42fefa39efL, 0x3fe39e8d4582829fL, 0x3fe13f7596e9c544L, 0x3fde148a1a2726ceL, 0x3fd9f323ecbf984dL, 0x3fd611ddd4bd6bf6L, 0x3fd269621134db92L, 0x3fcde71768d79cc6L, 0x3fc7565011e49675L, 0x3fc1178e8227e47cL, 0x3fb64660aa8ce629L, 0x3fa5ca5fb01e4225L, 0x8000000000000000UL.toLong(),
+        // cast = 25
+        0x4009c041f7ed8d33L, 0x400434b1382efeb8L, 0x4000f64cba970baeL, 0x3ffd5240f0e0e078L, 0x3ff9c041f7ed8d33L, 0x3ff6d577f5b0fa65L, 0x3ff45e1141a8c00fL, 0x3ff23b1f7163c380L, 0x3ff058aefa811452L, 0x3fed5240f0e0e077L, 0x3fea457901b9579fL, 0x3fe77cacec67badaL, 0x3fe4ecf732f00389L, 0x3fe28ddf8457462fL, 0x3fe058aefa811452L, 0x3fdc8ff7c79a9a21L, 0x3fd8aeb1af986dccL, 0x3fd50635ec0fdd69L, 0x3fd1905f8f46d038L, 0x3fcc8ff7c79a9a20L, 0x3fc6513637dde829L, 0x3fc05cd80afc76beL, 0x3fb5587f437b2869L, 0x3fa4e69ed6d80eb3L, 0x8000000000000000UL.toLong(),
+        // cast = 26
+        0x400a1094eaf01acdL, 0x400485042b318c51L, 0x4001469fad999947L, 0x3ffdf2e6d6e5fbaaL, 0x3ffa60e7ddf2a866L, 0x3ff7761ddbb61597L, 0x3ff4feb727addb42L, 0x3ff2dbc55768deb3L, 0x3ff0f954e0862f85L, 0x3fee938cbceb16ddL, 0x3feb86c4cdc38e04L, 0x3fe8bdf8b871f13fL, 0x3fe62e42fefa39efL, 0x3fe3cf2b50617c96L, 0x3fe199fac68b4ab8L, 0x3fdf128f5faf06ecL, 0x3fdb314947acda98L, 0x3fd788cd84244a34L, 0x3fd412f7275b3d04L, 0x3fd0ca937be1b9dbL, 0x3fcb56656806c1bdL, 0x3fc562073b255055L, 0x3fbf62dda3ccdb9bL, 0x3fb47dadcbbdba7fL, 0x3fa414bcc0a36654L, 0x8000000000000000UL.toLong(),
+        // cast = 27
+        0x400a5ddfb8038490L, 0x4004d24ef844f614L, 0x400193ea7aad030bL, 0x3ffe8d7c710ccf31L, 0x3ffafb7d78197bedL, 0x3ff810b375dce91eL, 0x3ff5994cc1d4aec9L, 0x3ff3765af18fb239L, 0x3ff193ea7aad030bL, 0x3fefc8b7f138bdeaL, 0x3fecbbf002113511L, 0x3fe9f323ecbf984cL, 0x3fe7636e3347e0fcL, 0x3fe5045684af23a2L, 0x3fe2cf25fad8f1c3L, 0x3fe0be72e4252a83L, 0x3fdd9b9fb04828b0L, 0x3fd9f323ecbf984dL, 0x3fd67d4d8ff68b1bL, 0x3fd334e9e47d07f6L, 0x3fd015891c9eaef7L, 0x3fca36b40c5bec88L, 0x3fc4861ba31d09fdL, 0x3fbe27076e2af2eaL, 0x3fb3b3b802beeb8fL, 0x3fa352b344da70ceL, 0x8000000000000000UL.toLong(),
+        // cast = 28
+        0x400aa85ad6964a23L, 0x40051cca16d7bba8L, 0x4001de65993fc89eL, 0x3fff2272ae325a58L, 0x3ffb9073b53f0713L, 0x3ff8a5a9b3027445L, 0x3ff62e42fefa39efL, 0x3ff40b512eb53d60L, 0x3ff228e0b7d28e31L, 0x3ff0795235c1ea1bL, 0x3fede5dc7c5c4b5eL, 0x3feb1d10670aae9aL, 0x3fe88d5aad92f749L, 0x3fe62e42fefa39efL, 0x3fe3f91275240811L, 0x3fe1e85f5e7040d1L, 0x3fdfef78a4de554dL, 0x3fdc46fce155c4e6L, 0x3fd8d126848cb7b6L, 0x3fd588c2d913348fL, 0x3fd269621134db92L, 0x3fcede65f58845bdL, 0x3fc92dcd8c496335L, 0x3fc3bb35a041d2abL, 0x3fbd031bd5179df7L, 0x3fb2f8bd74c5eacdL, 0x3fa29ec7a4b164d6L, 0x8000000000000000UL.toLong(),
+        // cast = 29
+        0x400af038cbcdfe1fL, 0x400564a80c0f6fa3L, 0x400226438e777c99L, 0x3fffb22e98a1c24eL, 0x3ffc202f9fae6f0aL, 0x3ff935659d71dc3bL, 0x3ff6bdfee969a1e6L, 0x3ff49b0d1924a557L, 0x3ff2b89ca241f628L, 0x3ff1090e20315212L, 0x3fef0554513b1b4dL, 0x3fec3c883be97e87L, 0x3fe9acd28271c737L, 0x3fe74dbad3d909ddL, 0x3fe5188a4a02d7feL, 0x3fe307d7334f10beL, 0x3fe11734274dfa94L, 0x3fde85ec8b1364c2L, 0x3fdb10162e4a5793L, 0x3fd7c7b282d0d46aL, 0x3fd4a851baf27b6eL, 0x3fd1ae22a481c2bbL, 0x3fcdabacdfc4a2eaL, 0x3fc83914f3bd1261L, 0x3fc2ff6d3e070eb7L, 0x3fbbf47c1bbc6a3dL, 0x3fb24b22794f31ddL, 0x3fa1f77d4decfed8L, 0x8000000000000000UL.toLong(),
+        // cast = 30
+        0x400b35a6f90bd69bL, 0x4005aa16394d481fL, 0x40026bb1bbb55515L, 0x40001e85798eb9a3L, 0x3ffcab0bfa2a2002L, 0x3ff9c041f7ed8d33L, 0x3ff748db43e552deL, 0x3ff525e973a0564fL, 0x3ff34378fcbda721L, 0x3ff193ea7aad030bL, 0x3ff00d8683193e9eL, 0x3fed5240f0e0e077L, 0x3feac28b37692927L, 0x3fe8637388d06bcdL, 0x3fe62e42fefa39efL, 0x3fe41d8fe84672afL, 0x3fe22cecdc455c84L, 0x3fe058aefa811452L, 0x3fdd3b8798391b74L, 0x3fd9f323ecbf984dL, 0x3fd6d3c324e13f50L, 0x3fd3d9940e70869cL, 0x3fd10147d9d11555L, 0x3fcc8ff7c79a9a20L, 0x3fc7565011e49675L, 0x3fc25120e1bbbcdfL, 0x3fbaf8e8210a415cL, 0x3fb1a9844eb18ef0L, 0x3fa15b8b4f761f03L, 0x8000000000000000UL.toLong(),
+        // cast = 31
+        0x400b78ce48912b5aL, 0x4005ed3d88d29cdeL, 0x4002aed90b3aa9d5L, 0x400061acc9140e62L, 0x3ffd315a9934c981L, 0x3ffa469096f836b2L, 0x3ff7cf29e2effc5dL, 0x3ff5ac3812aaffcdL, 0x3ff3c9c79bc8509eL, 0x3ff21a3919b7ac89L, 0x3ff093d52223e81cL, 0x3fee5ede2ef63374L, 0x3febcf28757e7c23L, 0x3fe97010c6e5becaL, 0x3fe73ae03d0f8cebL, 0x3fe52a2d265bc5abL, 0x3fe3398a1a5aaf81L, 0x3fe1654c3896674eL, 0x3fdf54c21463c16cL, 0x3fdc0c5e68ea3e46L, 0x3fd8ecfda10be549L, 0x3fd5f2ce8a9b2c92L, 0x3fd31a8255fbbb4fL, 0x3fd061365ff7f30aL, 0x3fcb88c50a39e26bL, 0x3fc68395da1108d1L, 0x3fc1aee908da6ca1L, 0x3fba0e6e3f5c26d8L, 0x3fb112af9865a76bL, 0x3fa0c9d3e1552fc4L, 0x8000000000000000UL.toLong(),
+        // cast = 32
+        0x400bb9d3beb8c86bL, 0x40062e42fefa39efL, 0x4002efde816246e6L, 0x4000a2b23f3bab73L, 0x3ffdb365858403a3L, 0x3ffac89b834770d4L, 0x3ff85134cf3f367fL, 0x3ff62e42fefa39efL, 0x3ff44bd288178ac1L, 0x3ff29c440606e6abL, 0x3ff115e00e73223fL, 0x3fef62f40794a7b8L, 0x3fecd33e4e1cf068L, 0x3fea74269f84330eL, 0x3fe83ef615ae0130L, 0x3fe62e42fefa39efL, 0x3fe43d9ff2f923c5L, 0x3fe269621134db92L, 0x3fe0ae76e2d054faL, 0x3fde148a1a2726ceL, 0x3fdaf5295248cdd0L, 0x3fd7fafa3bd8151cL, 0x3fd522ae0738a3d8L, 0x3fd269621134db92L, 0x3fcf991c6cb3b379L, 0x3fca93ed3c8ad9e3L, 0x3fc5bf406b543db2L, 0x3fc1178e8227e47cL, 0x3fb9335e5d594989L, 0x3fb08598b59e3a07L, 0x3fa0415d89e74444L, 0x8000000000000000UL.toLong(),
+    )
+
+    /** Same value as `-ln(count.toDouble() / cast)` on the desktop JVM, on every platform. */
+    fun cost(count: Int, cast: Int): Double {
+        if (cast !in 1..MAX_TABLE_CAST || count !in 1..cast) return -ln(count.toDouble() / cast)
+        return Double.fromBits(bits[(cast - 1) * cast / 2 + (count - 1)])
     }
 }

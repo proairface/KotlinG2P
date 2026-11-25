@@ -379,3 +379,32 @@ GPG-signed release pipeline, both of which are a real setup step rather than a c
 
 Needs JDK 17+. No Android dependency — this is a plain Kotlin/JVM library, usable from any JVM
 project, Android included.
+
+## JavaScript build (`js/`)
+
+The same sources also compile for the browser, for Detour's web version. `js/` is a separate
+Gradle build (not included from the root, so the JVM jar and its JitPack publication are
+untouched) that compiles everything in `src/main/kotlin` except the two JVM-only files,
+`BundledResources.kt` (the one place data files are read) and `JvmStreams.kt`, and replaces the
+first with `js/src/jsMain/.../JsBundledResources.kt`:
+
+```bash
+./gradlew -p js compileProductionLibraryKotlinJs   # ES module + .d.ts in js/build/compileSync/js/main/productionLibrary/kotlin
+```
+
+Needs `node` on PATH. A browser cannot read the jar's resources, so the page fetches the data files
+itself and hands them over with `provideResource(path, bytes)` (`englishResources()` and
+`dutchResources()` list which) before creating an `EnglishPhonemizer` or `DutchPhonemizer`.
+
+**The JavaScript build pronounces exactly like the JVM.** Checked on 46,010 inputs (random CMUdict
+words, out-of-dictionary words through the English letter-to-sound model, Dutch words and full
+navigation sentences): byte-identical IPA from v0.7.0's jar, this version's jar and the JavaScript
+build. Getting there took two fixes in `LtsModel`, both of which keep the JVM output unchanged:
+
+- **Vote order.** Ties between equally voted phonemes were broken by `HashMap` iteration order,
+  which differs between platforms (6 of 6,010 words differed). `VoteTally` now visits votes in
+  the JDK `HashMap`'s exact order on every platform.
+- **Logarithms.** `ln` differs in the last bit between engines (31 of the 528 possible vote
+  ratios on V8 versus HotSpot; Android's runtime has its own implementation again), which broke
+  ties in the beam differently (2 of 40,000 words). `VoteCosts` holds those 528 values as exact
+  bit patterns, taken from HotSpot, which every model here was trained and measured with.
